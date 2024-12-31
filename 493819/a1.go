@@ -1,94 +1,88 @@
 package main
 
 import (
-	"context"
+	"fmt"
 	"log"
 	"net/http"
-	"sync"
+	"strings"
 	"time"
 )
 
-// Cache to store request counts
-var cache = make(map[string]*counter, 100)
-var cacheLock sync.RWMutex
+var requestLimits map[string]int // Map to store request limits for each user
+var requestCount map[string]int  // Map to store number of requests per user
+var windowDuration = time.Minute  // Time window for counting requests
 
-// Counter structure to hold request counts and reset time
-type counter struct {
-	count  int
-	reset  time.Time
-	mutex  sync.Mutex
+// Initialize the request limit and request count maps
+func init() {
+	requestLimits = make(map[string]int)
+	requestCount = make(map[string]int)
 }
 
-// RateLimitMiddleware middleware to enforce rate limiting
-func RateLimitMiddleware(limit int, period time.Duration) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Get the API key from the query parameter
-			apiKey := r.URL.Query().Get("apiKey")
+// GetUserID retrieves the user ID from the request URL query parameters
+func getUserID(r *http.Request) string {
+	return r.URL.Query().Get("user_id")
+}
 
-			// Check if the API key is present
-			if apiKey == "" {
-				http.Error(w, "API key required", http.StatusUnauthorized)
-				return
-			}
-
-			// Lock the cache for safe access
-			cacheLock.RLock()
-			c, exists := cache[apiKey]
-			cacheLock.RUnlock()
-
-			// Initialize counter if not exists
-			if !exists {
-				cacheLock.Lock()
-				defer cacheLock.Unlock()
-				c = &counter{
-					count:  0,
-					reset:  time.Now(),
-					mutex:  sync.Mutex{},
-				}
-				cache[apiKey] = c
-			}
-
-			// Increment request count
-			c.mutex.Lock()
-			c.count++
-			c.mutex.Unlock()
-
-			// Check against rate limit
-			now := time.Now()
-			if now.Before(c.reset) {
-				if c.count > limit {
-					http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-					return
-				}
-			} else {
-				// Reset counter if the period is over
-				cacheLock.Lock()
-				c.reset = now.Add(period)
-				cacheLock.Unlock()
-			}
-
-			// Proceed with the next handler
-			next.ServeHTTP(w, r)
-		})
+// IsRateLimited checks if the user has exceeded the rate limit
+func isRateLimited(userID string, limit int) bool {
+	// Check if the limit is set
+	if limit <= 0 {
+		return false // No limit means no restriction
 	}
+
+	// Get the current time and reset the request count map every windowDuration
+	currentTime := time.Now()
+	keysToRemove := make([]string, 0)
+	for key, count := range requestCount {
+		if currentTime.Sub(requestCount[key].time) > windowDuration {
+			keysToRemove = append(keysToRemove, key)
+		}
+	}
+	for _, key := range keysToRemove {
+		delete(requestCount, key)
+	}
+
+	// Check if the user has already reached the limit in the current window
+	if count, ok := requestCount[userID]; ok && count >= limit {
+		return true
+	}
+
+	// Update request count
+	requestCount[userID] = requestCount[userID]+1 if ok else 1
+	requestCount[userID].time = currentTime
+	return false
+}
+
+// HandleOverload manages the response when a user exceeds the rate limit
+func handleOverload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	fmt.Fprintf(w, `{"message": "Rate limit exceeded for user_id: %s", "limit": %d}`, getUserID(r), requestLimits[getUserID(r)])
+}
+
+// ExampleHandler is a simple handler function to demonstrate rate limiting
+func exampleHandler(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	limit, ok := requestLimits[userID]
+	if !ok {
+		// Set a default limit if user_id not found
+		limit = 10
+		requestLimits[userID] = limit
+	}
+
+	if isRateLimited(userID, limit) {
+		handleOverload(w, r)
+		return
+	}
+
+	fmt.Fprintf(w, "Hello, user_id: %s! Your limit is %d requests per %v.\n", userID, limit, windowDuration)
 }
 
 func main() {
-	// Define the rate limit and period
-	limit := 10
-	period := time.Minute
+	// Define some example routes
+	http.HandleFunc("/example", exampleHandler)
 
-	// Create a handler for your API endpoint
-	http.HandleFunc("/api/resource", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hello, World!"))
-	})
-
-	// Apply rate limit middleware
-	http.Handle("/api/resource", RateLimitMiddleware(limit, period)(http.DefaultServeMux))
-
-	// Start the HTTP server
+	// Start the server
 	log.Println("Server starting on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal(err)

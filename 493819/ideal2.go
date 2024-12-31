@@ -2,118 +2,79 @@ package main
 
 import (
 	"fmt"
-	"net/http"
-	"strconv"
-	"sync"
+	"log"
 	"time"
 )
 
-// SlidingWindow struct to manage rate limiting with a sliding window
-type SlidingWindow struct {
-	limit    int
-	window   time.Duration
-	requests []time.Time
-	mu       sync.Mutex
+type RateLimiter struct {
+	UserID          string
+	CurrentRate     int
+	MaxRate         int
+	Threshold       int
+	ResetInterval   time.Duration
+	BehaviorHistory []int // Stores the rate history for dynamic adjustments
+	LastRequestTime time.Time
 }
 
-// NewSlidingWindow creates a new sliding window rate limiter for users with a specified limit and window size
-func NewSlidingWindow(limit int, window time.Duration) *SlidingWindow {
-	return &SlidingWindow{
-		limit:  limit,
-		window: window,
+// Initialize a new rate limiter for a user
+func NewRateLimiter(userID string, maxRate, threshold int, resetInterval time.Duration) *RateLimiter {
+	return &RateLimiter{
+		UserID:        userID,
+		CurrentRate:   0,
+		MaxRate:       maxRate,
+		Threshold:     threshold,
+		ResetInterval: resetInterval,
+		LastRequestTime: time.Now(),
 	}
 }
 
-// Allow checks if a user's request is within the rate limit using a sliding window
-func (sw *SlidingWindow) Allow() bool {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-
-	now := time.Now()
-
-	// Remove requests that are outside the window
-	var validRequests []time.Time
-	for _, reqTime := range sw.requests {
-		if now.Sub(reqTime) <= sw.window {
-			validRequests = append(validRequests, reqTime)
-		}
-	}
-
-	// Update the list of requests to only include those within the window
-	sw.requests = validRequests
-
-	// If the number of requests exceeds the limit, deny the request
-	if len(sw.requests) >= sw.limit {
+// Check if a user is within their rate limit
+func (rl *RateLimiter) CheckLimit() bool {
+	if rl.CurrentRate >= rl.MaxRate {
+		log.Printf("User %s exceeded rate limit: %d/%d\n", rl.UserID, rl.CurrentRate, rl.MaxRate)
 		return false
 	}
-
-	// Record the current request
-	sw.requests = append(sw.requests, now)
 	return true
 }
 
-type RateLimiter struct {
-	userLimits map[string]*SlidingWindow
-	mu         sync.Mutex
-}
-
-// NewRateLimiter creates a new rate limiter for tracking different user limits
-func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{
-		userLimits: make(map[string]*SlidingWindow),
-	}
-}
-
-// Allow checks if a user's request is allowed, considering their individual limit and window
-func (rl *RateLimiter) Allow(userID string, limit int, window time.Duration) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	// If the user doesn't have a rate limiter, create one
-	if _, exists := rl.userLimits[userID]; !exists {
-		rl.userLimits[userID] = NewSlidingWindow(limit, window)
+// Simulate a request and adjust the rate accordingly
+func (rl *RateLimiter) Request() string {
+	// If enough time has passed to reset the rate limit, reset it
+	if time.Since(rl.LastRequestTime) >= rl.ResetInterval {
+		rl.CurrentRate = 0
+		log.Printf("Rate limit reset for user %s.\n", rl.UserID)
 	}
 
-	// Check if the request is allowed based on the sliding window
-	return rl.userLimits[userID].Allow()
+	// First check if the user is within the rate limit
+	if !rl.CheckLimit() {
+		// User exceeded rate limit, log error and stop processing further requests
+		rl.LastRequestTime = time.Now() // Update the last request time to manage cooldown
+		return fmt.Sprintf("Error: Rate limit exceeded. Please try again in %v.", rl.ResetInterval)
+	}
+
+	// Increment the current request count
+	rl.CurrentRate++
+
+	// Log the successful request
+	log.Printf("User %s made a request: %d/%d\n", rl.UserID, rl.CurrentRate, rl.MaxRate)
+	return "Request successful."
 }
 
 func main() {
-	limiter := NewRateLimiter()
+	// Initialize rate limiter for a user with max rate 10 and a reset interval of 1 minute
+	rl := NewRateLimiter("user123", 10, 5, time.Minute)
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		userID := r.FormValue("user")
-		limitStr := r.FormValue("limit")
-		windowStr := r.FormValue("window")
+	// Simulate user behavior with a few requests
+	for i := 0; i < 30; i++ { // Simulating 30 requests
+		result := rl.Request()
+		fmt.Println(result)
 
-		if userID == "" || limitStr == "" || windowStr == "" {
-			http.Error(w, "Missing required parameters: user, limit, window", http.StatusBadRequest)
-			return
+		// Stop further requests once the limit is exceeded
+		if result == "Error: Rate limit exceeded. Please try again in 1m0s." {
+			// Break the loop when the rate limit is exceeded
+			break
 		}
 
-		limit, err := strconv.Atoi(limitStr)
-		if err != nil {
-			http.Error(w, "Invalid limit parameter", http.StatusBadRequest)
-			return
-		}
-
-		window, err := time.ParseDuration(windowStr)
-		if err != nil {
-			http.Error(w, "Invalid window parameter", http.StatusBadRequest)
-			return
-		}
-
-		// Check if the request is allowed for this user
-		if !limiter.Allow(userID, limit, window) {
-			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-			return
-		}
-
-		// Successful request
-		fmt.Fprintf(w, "Hello, %s! You have %d requests left in the %v window.\n", userID, limit-len(limiter.userLimits[userID].requests), window)
-	})
-
-	// Start the HTTP server
-	fmt.Println("Server is running on port 8080")
-	http.ListenAndServe(":8080", nil)
+		time.Sleep(500 * time.Millisecond) // Simulate time delay between requests
+	}
 }

@@ -2,104 +2,103 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
 )
 
-type slidingWindow struct {
-	limit     int
-	window    time.Duration
-	requests  []time.Time
-	requestsMu sync.Mutex
+type RateLimiter struct {
+	maxRequests int
+	resetTime   time.Duration
+	requests    int
+	lastReset   time.Time
+	mu          sync.Mutex
 }
 
-func newSlidingWindow(limit int, window time.Duration) *slidingWindow {
-	return &slidingWindow{
-		limit:  limit,
-		window: window,
-	}
+const (
+	defaultLimit      = 10         // Default max requests per user
+	defaultResetTime  = 60 * time.Second // Default reset time
+	increaseThreshold = 0.8         // If requests <= threshold * maxRequests, increase limit
+	decreaseThreshold = 1.2         // If requests >= threshold * maxRequests, decrease limit
+	limitIncreaseStep = 1         // How much to increase the limit
+	limitDecreaseStep = -1        // How much to decrease the limit
+)
+
+var userLimits = map[string]*RateLimiter{}
+var logger *log.Logger
+
+func init() {
+	// Initialize logger to a standard error
+	logger = log.New(log.Writer(), "rate-limiter: ", log.LstdFlags|log.Lshortfile)
 }
 
-func (w *slidingWindow) allow() bool {
-	w.requestsMu.Lock()
-	defer w.requestsMu.Unlock()
-
-	// Remove requests older than the window duration
-	now := time.Now()
-	for i, reqTime := range w.requests {
-		if now.Sub(reqTime) > w.window {
-			w.requests = w.requests[i+1:]
-			break
-		}
-	}
-
-	// Add the current request
-	w.requests = append(w.requests, now)
-
-	// Check if the limit is exceeded
-	return len(w.requests) <= w.limit
-}
-
-type userRateLimiter struct {
-	userLimits  map[string]*slidingWindow
-	userLimitsMu sync.Mutex
-}
-
-func newUserRateLimiter() *userRateLimiter {
-	return &userRateLimiter{
-		userLimits: make(map[string]*slidingWindow),
-	}
-}
-
-func (rl *userRateLimiter) allow(userID string, limit int, window time.Duration) bool {
-	rl.userLimitsMu.Lock()
-	defer rl.userLimitsMu.Unlock()
-
-	// Retrieve or initialize the user's rate limit window
-	window, ok := rl.userLimits[userID]
-	if !ok {
-		rl.userLimits[userID] = newSlidingWindow(limit, window)
+// Initialize the rate limiter for a user
+func getRateLimiter(userID string) *RateLimiter {
+	// Check if user rate limiter exists
+	if limiter, exists := userLimits[userID]; exists {
+		return limiter
 	}
 
-	return window.allow()
+	// Otherwise, create a new rate limiter
+	limiter := &RateLimiter{
+		maxRequests: defaultLimit,
+		resetTime:   defaultResetTime,
+		lastReset:   time.Now(),
+	}
+	userLimits[userID] = limiter
+	return limiter
 }
 
-func main() {
-	limiter := newUserRateLimiter()
+// Apply the rate limiting check and dynamically adjust the limit based on user behavior
+func (limiter *RateLimiter) isAllowed() bool {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		userID := r.FormValue("user")
-		limitStr := r.FormValue("limit")
-		windowStr := r.FormValue("window")
+	// If reset time has passed, reset the counter
+	if time.Since(limiter.lastReset) > limiter.resetTime {
+		limiter.requests = 0
+		limiter.lastReset = time.Now()
+	}
 
-		if userID == "" || limitStr == "" || windowStr == "" {
-			http.Error(w, "Missing required parameters: user, limit, window", http.StatusBadRequest)
-			return
-		}
+	// Check if the user has exceeded the max requests
+	if limiter.requests < limiter.maxRequests {
+		limiter.requests++
+		return true
+	}
 
-		limit, err := strconv.Atoi(limitStr)
-		if err != nil {
-			http.Error(w, "Invalid limit parameter", http.StatusBadRequest)
-			return
-		}
+	// User has exceeded the limit, decide whether to increase or decrease limit dynamically
+	if float64(limiter.requests)/float64(limiter.maxRequests) < increaseThreshold {
+		// User is under the threshold, increase the limit
+		limiter.maxRequests += limitIncreaseStep
+		logger.Printf("User %q's rate limit increased to %d", userID, limiter.maxRequests)
+	} else if float64(limiter.requests)/float64(limiter.maxRequests) > decreaseThreshold {
+		// User is over the threshold, decrease the limit
+		limiter.maxRequests += limitDecreaseStep
+		logger.Printf("User %q's rate limit decreased to %d", userID, limiter.maxRequests)
+	}
+	return false
+}
 
-		window, err := time.ParseDuration(windowStr)
-		if err != nil {
-			http.Error(w, "Invalid window parameter", http.StatusBadRequest)
-			return
-		}
+// Rate limiter middleware function
+func rateLimitHandler(w http.ResponseWriter, r *http.Request) {
+	// Get userID from query parameters
+	userID := r.URL.Query().Get("userID")
+	if userID == "" {
+		http.Error(w, "UserID is required", http.StatusBadRequest)
+		return
+	}
 
-		allowed := limiter.allow(userID, limit, window)
-		if !allowed {
-			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-			return
-		}
+	// Get the rate limiter for the user
+	limiter := getRateLimiter(userID)
 
-		fmt.Fprintf(w, "Hello, %s!", userID)
-	})
+	// Check if the user request is allowed
+	if !limiter.isAllowed() {
+		// User has exceeded the limit, respond with a clear message
+		http.Error(w, "Rate limit exceeded. Please try again later or contact support for temporary rate increase.", http.StatusTooManyRequests)
+		return
+	}
 
-	fmt.Println("Server is running on port 8080")
-	http.ListenAndServe(":8080", nil)
-}  
+	// If allowed, process the request
+	w.WriteHeader(http.StatusOK)

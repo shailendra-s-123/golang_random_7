@@ -1,11 +1,10 @@
-
 package main
 
 import (
     "fmt"
     "net/http"
     "strconv"
-    "time"
+
 
     "github.com/gin-gonic/gin"
     "golang.org/x/time/rate"
@@ -78,4 +77,3 @@ func rateLimitMiddleware(c *gin.Context) {
 
     c.Next()
 }
-

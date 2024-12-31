@@ -3,84 +3,99 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
 
-// userRateLimiter struct to manage rate limiting for users
-type userRateLimiter struct {
-	limit       int               // Maximum requests allowed
-	window      time.Duration     // Time window in which requests are counted
-	userLimits  map[string]*userLimit
-	userLimitsMu sync.Mutex
+type RateLimiter struct {
+	maxRequests int
+	resetTime   time.Duration
+	requests    int
+	lastReset   time.Time
+	mu          sync.Mutex
 }
 
-// userLimit struct to store individual user request data
-type userLimit struct {
-	lastCheck time.Time // Last time user made a request
-	requests  int       // Number of requests in the current window
-}
+var userLimits = map[string]*RateLimiter{}
+var defaultLimit = 10 // Default max requests per user
+var defaultResetTime = 60 * time.Second // Default reset time
 
-// NewUserRateLimiter creates a new rate limiter for users with specified limit and window size
-func newUserRateLimiter(limit int, window time.Duration) *userRateLimiter {
-	return &userRateLimiter{
-		limit:      limit,
-		window:     window,
-		userLimits: make(map[string]*userLimit),
+// Initialize the rate limiter for a user
+func getRateLimiter(userID string) *RateLimiter {
+	// Check if user rate limiter exists
+	if limiter, exists := userLimits[userID]; exists {
+		return limiter
 	}
+
+	// Otherwise, create a new rate limiter
+	limiter := &RateLimiter{
+		maxRequests: defaultLimit,
+		resetTime:   defaultResetTime,
+		lastReset:   time.Now(),
+	}
+	userLimits[userID] = limiter
+	return limiter
 }
 
-// allow checks if a user's request is within the rate limit
-func (rl *userRateLimiter) allow(userID string) bool {
-	rl.userLimitsMu.Lock()
-	defer rl.userLimitsMu.Unlock()
+// Apply the rate limiting check
+func (limiter *RateLimiter) isAllowed() bool {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
 
-	// Retrieve or initialize the user's rate limit data
-	limit, ok := rl.userLimits[userID]
-	if !ok {
-		rl.userLimits[userID] = &userLimit{
-			lastCheck: time.Now(),
-			requests:  1,
+	// If reset time has passed, reset the counter
+	if time.Since(limiter.lastReset) > limiter.resetTime {
+		limiter.requests = 0
+		limiter.lastReset = time.Now()
+	}
+
+	// Check if the user has exceeded the max requests
+	if limiter.requests < limiter.maxRequests {
+		limiter.requests++
+		return true
+	}
+	return false
+}
+
+// Rate limiter middleware function
+func rateLimitHandler(w http.ResponseWriter, r *http.Request) {
+	// Get userID from query parameters
+	userID := r.URL.Query().Get("userID")
+	if userID == "" {
+		http.Error(w, "UserID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse the dynamic limit from query parameters if provided
+	maxRequestsStr := r.URL.Query().Get("maxRequests")
+	if maxRequestsStr != "" {
+		maxRequests, err := strconv.Atoi(maxRequestsStr)
+		if err == nil && maxRequests > 0 {
+			// Update the limit for the user
+			limiter := getRateLimiter(userID)
+			limiter.maxRequests = maxRequests
 		}
-		return true // New user, allow immediately
 	}
 
-	// Check the time difference to determine if we need to reset the counter
-	now := time.Now()
-	if now.Sub(limit.lastCheck) > rl.window {
-		// Reset request count if the window has expired
-		limit.requests = 1
-	} else {
-		limit.requests++
+	// Get the rate limiter for the user
+	limiter := getRateLimiter(userID)
+
+	// Check if the user request is allowed
+	if !limiter.isAllowed() {
+		http.Error(w, "Rate limit exceeded. Please try again later.", http.StatusTooManyRequests)
+		return
 	}
 
-	limit.lastCheck = now
-	allowed := limit.requests <= rl.limit
-
-	return allowed
+	// If allowed, process the request (for demonstration, just return success)
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Request for user %s is allowed.\n", userID)
 }
 
 func main() {
-	// Initialize rate limiter with a limit of 5 requests per 10 seconds
-	limiter := newUserRateLimiter(5, time.Second*10)
+	http.HandleFunc("/api", rateLimitHandler)
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		userID := r.FormValue("user") // Extract userID from the query parameter
-		if userID == "" {
-			http.Error(w, "Missing user parameter", http.StatusBadRequest)
-			return
-		}
-
-		// Check if the user is allowed to make a request
-		allowed := limiter.allow(userID)
-		if !allowed {
-			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-			return
-		}
-		fmt.Fprintf(w, "Hello, %s!", userID) // Successful request
-	})
-
-	// Start the HTTP server
-	fmt.Println("Server is running on port 8080")
-	http.ListenAndServe(":8080", nil)
+	// Start the server
+	fmt.Println("Starting server on :8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Println("Error starting server:", err)
+	}
 }

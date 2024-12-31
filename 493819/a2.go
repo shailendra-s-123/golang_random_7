@@ -3,120 +3,135 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
-// slidingWindow struct to manage rate limiting with a sliding window
-type slidingWindow struct {
-	limit    int        // Maximum requests allowed
-	window   time.Duration // Time window in which requests are counted
-	buckets  map[time.Time][]string
-	bucketsMu sync.Mutex
+// Initialize logging
+var log = logrus.New()
+log.SetLevel(logrus.DebugLevel)
+
+type RateLimiter struct {
+	maxRequests int
+	resetTime   time.Duration
+	requests    int
+	lastReset   time.Time
+	mu          sync.Mutex
 }
 
-// NewSlidingWindow creates a new sliding window rate limiter for users with specified limit and window size
-func newSlidingWindow(limit int, window time.Duration) *slidingWindow {
-	return &slidingWindow{
-		limit:    limit,
-		window:   window,
-		buckets:  make(map[time.Time][]string),
-	}
-}
+var userLimits = map[string]*RateLimiter{}
+var defaultLimit = 10 // Default max requests per user
+var defaultResetTime = 60 * time.Second // Default reset time
+var adjustmentFactor = 1.2 // Increase factor for good behavior
+var decreaseFactor = 0.8  // Decrease factor for hitting limit
 
-// cleanOldBuckets removes buckets that are older than the sliding window
-func (sw *slidingWindow) cleanOldBuckets() {
-	now := time.Now()
-	for key := range sw.buckets {
-		if key.Add(sw.window).Before(now) {
-			delete(sw.buckets, key)
-		}
-	}
-}
-
-// allow checks if a user's request is within the rate limit using a sliding window
-func (sw *slidingWindow) allow(userID string) bool {
-	sw.bucketsMu.Lock()
-	defer sw.bucketsMu.Unlock()
-
-	now := time.Now()
-	sw.cleanOldBuckets()
-
-	// Get bucket for current second
-	for key, _ := range sw.buckets {
-		if key.Year() == now.Year() && key.Month() == now.Month() && key.Day() == now.Day() && key.Hour() == now.Hour() && key.Minute() == now.Minute() && key.Second() == now.Second() {
-			bucket, ok := sw.buckets[key]
-			if ok {
-				// Check if the user is already in the bucket
-				if contains(bucket, userID) {
-					return false
-				}
-				// Add user to the bucket
-				sw.buckets[key] = append(bucket, userID)
-				return true
-			}
-			// Create new bucket if it doesn't exist
-			sw.buckets[key] = []string{userID}
-			return true
-		}
+// Initialize the rate limiter for a user
+func getRateLimiter(userID string) *RateLimiter {
+	// Check if user rate limiter exists
+	if limiter, exists := userLimits[userID]; exists {
+		return limiter
 	}
 
-	// Create new bucket for current second if none exists
-	sw.buckets[now] = []string{userID}
-	return true
+	// Otherwise, create a new rate limiter
+	limiter := &RateLimiter{
+		maxRequests: defaultLimit,
+		resetTime:   defaultResetTime,
+		lastReset:   time.Now(),
+	}
+	userLimits[userID] = limiter
+	return limiter
 }
 
-func contains(s []string, e string) bool {
-	for _, a := range s {
-		if a == e {
-			return true
-		}
+// Apply the rate limiting check
+func (limiter *RateLimiter) isAllowed() bool {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+
+	// If reset time has passed, reset the counter
+	if time.Since(limiter.lastReset) > limiter.resetTime {
+		limiter.requests = 0
+		limiter.lastReset = time.Now()
+	}
+
+	// Check if the user has exceeded the max requests
+	if limiter.requests < limiter.maxRequests {
+		limiter.requests++
+		return true
 	}
 	return false
 }
 
+// Adjust rate limits dynamically
+func (limiter *RateLimiter) adjustLimit(allowed bool) {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+
+	if allowed {
+		limiter.maxRequests = int(float64(limiter.maxRequests) * adjustmentFactor)
+	} else {
+		limiter.maxRequests = int(float64(limiter.maxRequests) * decreaseFactor)
+	}
+
+	log.WithFields(logrus.Fields{
+		"userID":     limiter.maxRequests,
+		"newLimit":   limiter.maxRequests,
+		"allowed":    allowed,
+		"resetTime":  limiter.resetTime,
+		"requests":   limiter.requests,
+		"lastReset":  limiter.lastReset,
+	}).Debug("Adjusted rate limit")
+}
+
+// Rate limiter middleware function
+func rateLimitHandler(w http.ResponseWriter, r *http.Request) {
+	// Get userID from query parameters
+	userID := r.URL.Query().Get("userID")
+	if userID == "" {
+		http.Error(w, "UserID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse the dynamic limit from query parameters if provided
+	maxRequestsStr := r.URL.Query().Get("maxRequests")
+	if maxRequestsStr != "" {
+		maxRequests, err := strconv.Atoi(maxRequestsStr)
+		if err == nil && maxRequests > 0 {
+			// Update the limit for the user
+			limiter := getRateLimiter(userID)
+			limiter.maxRequests = maxRequests
+			log.WithFields(logrus.Fields{
+				"userID":     userID,
+				"newLimit":   limiter.maxRequests,
+				"adjusted":   true,
+			}).Debug("User-defined limit set")
+		}
+	}
+
+	// Get the rate limiter for the user
+	limiter := getRateLimiter(userID)
+
+	// Check if the user request is allowed
+	if !limiter.isAllowed() {
+		limiter.adjustLimit(false)
+		http.Error(w, "Rate limit exceeded. Please try again later or contact support for assistance.", http.StatusTooManyRequests)
+		return
+	}
+
+	// If allowed, process the request (for demonstration, just return success)
+	limiter.adjustLimit(true)
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Request for user %s is allowed.\n", userID)
+}
+
 func main() {
-	// Initialize rate limiter with a limit of 5 requests per 10 seconds
-	limiter := newSlidingWindow(5, time.Second*10)
+	http.HandleFunc("/api", rateLimitHandler)
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		userID := r.FormValue("user") // Extract userID from the query parameter
-		limitStr := r.FormValue("limit")
-		windowStr := r.FormValue("window")
-
-		if userID == "" {
-			http.Error(w, "Missing user parameter", http.StatusBadRequest)
-			return
-		}
-
-		if limitStr != "" {
-			limit, err := strconv.Atoi(limitStr)
-			if err != nil {
-				http.Error(w, "Invalid limit parameter", http.StatusBadRequest)
-				return
-			}
-			limiter.limit = limit
-		}
-
-		if windowStr != "" {
-			duration, err := strconv.ParseInt(windowStr, 10, 64)
-			if err != nil {
-				http.Error(w, "Invalid window parameter", http.StatusBadRequest)
-				return
-			}
-			limiter.window = time.Duration(duration) * time.Second
-		}
-
-		// Check if the user is allowed to make a request
-		allowed := limiter.allow(userID)
-		if !allowed {
-			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-			return
-		}
-		fmt.Fprintf(w, "Hello, %s! Rate Limit: %d/%ds\n", userID, limiter.limit, limiter.window.Seconds()) // Successful request
-	})
-
-	// Start the HTTP server
-	fmt.Println("Server is running on port 8080")
-	http.ListenAndServe(":8080", nil)
+	// Start the server
+	fmt.Println("Starting server on :8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Println("Error starting server:", err)
+	}
 }
