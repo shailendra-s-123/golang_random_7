@@ -1,69 +1,53 @@
-
 package main  
 import (  
-    "fmt"
-    "log"
-    "net/http"
-    "regexp"
-    "strings"
-
-    "github.com/gorilla/mux"
-    "github.com/microcosm-cc/bluemonday"
+        "fmt"
+        "log"
+        "net/http"
+        "github.com/gorilla/mux"
+        "github.com/microcosm-cc/bluemonday"
+        "regexp"
 )
 
-// FirewallMiddleware is a middleware function that filters and secures query parameters
-func FirewallMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // Get query parameters
-        queryParams := r.URL.Query()
-
-        // Apply filtering to each query parameter
-        for key, values := range queryParams {
-            for i, value := range values {
-                filteredValue := filterQueryParameter(value)
-                queryParams.Set(key, filteredValue)
-                if filteredValue != value {
-                    logSuspiciousActivity("XSS or SQL Injection attempt detected:", r)
-                }
-            }
-        }
-
-        // Update the request with the filtered query parameters
-        r.URL.RawQuery = queryParams.Encode()
-
-        // Call the next handler in the chain
-        next.ServeHTTP(w, r)
-    })
+// sanitizeInput uses bluemonday to sanitize the given string
+func sanitizeInput(input string) string {
+        p := bluemonday.NewPolicy()
+        p.AllowAttrs().OnElements("a")
+        p.RequireParseableURLs(true)
+        return p.Sanitize(input)
 }
 
-// filterQueryParameter applies filtering to a single query parameter
-func filterQueryParameter(param string) string {
-    // Filter out suspicious characters for SQL injection and XSS
-    filteredParam := regexp.MustCompile(`[^a-zA-Z0-9_ %.-]+`).ReplaceAllString(param, "")
-    filteredParam = strings.TrimSpace(filteredParam)
-
-    // Apply XSS protection using bluemonday
-    p := bluemonday.NewPolicy()
-    filteredParam = p.Sanitize(filteredParam)
-
-    return filteredParam
-}
-
-// logSuspiciousActivity logs suspicious activity to the console
-func logSuspiciousActivity(message string, r *http.Request) {
-    log.Printf("%s %s from %s\n", message, r.URL.Path, r.RemoteAddr)
+// ValidateEmail uses a regular expression to validate email format
+func ValidateEmail(email string) bool {
+        const emailRegex = `^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`
+        match, _ := regexp.MatchString(emailRegex, email)
+        return match
 }
 
 func main() {
-    router := mux.NewRouter()
-
-    // Sample route that handles GET requests to /users
-    router.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
-        userID := r.URL.Query().Get("id")
-        fmt.Fprintf(w, "User ID: %s\n", userID)
-    }).Methods("GET")
-
-    // Apply the firewall middleware to all routes
-    http.ListenAndServe(":8080", FirewallMiddleware(router))
+        r := mux.NewRouter()
+        r.HandleFunc("/user", handleUser).Methods("GET")
+        log.Fatal(http.ListenAndServe(":8080", r))
 }
-  
+
+func handleUser(w http.ResponseWriter, r *http.Request) {
+        // Get the URL query parameters
+        params := r.URL.Query()
+        
+        // Validate and sanitize user input parameters
+        userID := params.Get("user_id")
+        safeUserID := sanitizeInput(userID)
+        if safeUserID == "" {
+                http.Error(w, "Invalid user ID", http.StatusBadRequest)
+                return
+        }
+        
+        email := params.Get("email")
+        safeEmail := sanitizeInput(email)
+        if safeEmail == "" || !ValidateEmail(safeEmail) {
+                http.Error(w, "Invalid email format", http.StatusBadRequest)
+                return
+        }
+        
+        // Now you can use the sanitized and validated parameters in your application
+        fmt.Fprintf(w, "Hello, User ID: %s, Email: %s", safeUserID, safeEmail)
+}
