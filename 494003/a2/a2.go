@@ -1,116 +1,128 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
-	"errors"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"strings"
 )
 
-// Structs for XML Data with Namespace
+// Define a structure to represent the XML data
 type Person struct {
-	XMLName   xml.Name `xml:"http://example.com/namespace person"`
-	Name      string   `xml:"name" validate:"required"`
-	Age       int      `xml:"age" validate:"min=0"`
-	Address   string   `xml:"address" validate:"required"`
-	Website   string   `xml:"website,omitempty"`
+	Name string `xml:"name"`
+	Age  int    `xml:"age"`
 }
 
-type Data struct {
-	XMLName xml.Name `xml:"http://example.com/namespace data"`
-	People  []Person `xml:"http://example.com/namespace person"`
-}
-
-// Custom Error Types
-var (
-	ErrMalformedXML = errors.New("malformed XML data")
-	ErrMissingField = errors.New("missing required XML fields")
-)
-
-// Read XML file with namespaces
-func readXML(filePath string) (Data, error) {
-	file, err := os.Open(filePath)
+func main() {
+	// Parse XML file with error recovery and auto-correction
+	data, err := parseXMLFile("data.xml")
 	if err != nil {
-		return Data{}, fmt.Errorf("failed to open file: %w", err)
+		log.Printf("Error parsing XML file: %v", err)
+		return
 	}
-	defer file.Close()
+	fmt.Println("Parsed Data:", data)
 
-	decoder := xml.NewDecoder(file)
-	var data Data
+	// Create XML file with error recovery
+	err = createXMLFile("output.xml", data)
+	if err != nil {
+		log.Printf("Error creating XML file: %v", err)
+	}
+}
+
+// Function to parse XML file with error recovery and auto-correction
+func parseXMLFile(filename string) ([]Person, error) {
+	var people []Person
+
+	// Read XML file
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("error reading file: %v", err)
+	}
+
+	// Auto-correct missing closing tags
+	data = fixMissingClosingTags(data)
+
+	// Attempt to parse XML data into the People struct
+	err = xml.Unmarshal(data, &people)
+	if err != nil {
+		// Handle specific parsing errors
+		if syntaxError, ok := err.(*xml.SyntaxError); ok {
+			log.Printf("Malformed XML syntax: %v", syntaxError)
+			return nil, fmt.Errorf("XML syntax error: %v", syntaxError)
+		}
+		// Handle other errors
+		log.Printf("Error parsing XML: %v", err)
+		return nil, fmt.Errorf("error parsing XML: %v", err)
+	}
+
+	return people, nil
+}
+
+// Function to fix missing closing tags
+func fixMissingClosingTags(data []byte) []byte {
+	var buffer bytes.Buffer
+	reader := bytes.NewReader(data)
+	writer := xml.NewEncoder(&buffer)
+	decoder := xml.NewDecoder(reader)
+
 	for {
 		token, err := decoder.Token()
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return Data{}, fmt.Errorf("error reading XML token: %w", err)
+			log.Printf("Error reading XML token: %v", err)
+			return nil
 		}
 
 		switch t := token.(type) {
 		case xml.StartElement:
-			if t.Name.Space == "http://example.com/namespace" && t.Name.Local == "data" {
-				if err := decoder.DecodeElement(&data, &t); err != nil {
-					return Data{}, fmt.Errorf("failed to decode XML element: %w", err)
-				}
+			// Write the start element
+			err = writer.StartElement(t)
+			if err != nil {
+				log.Printf("Error writing start element: %v", err)
+				return nil
 			}
+		case xml.EndElement:
+			// Write the end element
+			err = writer.EndElement(t)
+			if err != nil {
+				log.Printf("Error writing end element: %v", err)
+				return nil
+			}
+		case xml.CharData:
+			// Write the character data
+			err = writer.CharData(t)
+			if err != nil {
+				log.Printf("Error writing character data: %v", err)
+				return nil
+			}
+		default:
+			log.Printf("Unhandled token type: %T", t)
 		}
 	}
 
-	// Check for missing required fields
-	for _, person := range data.People {
-		if strings.TrimSpace(person.Name) == "" || strings.TrimSpace(person.Address) == "" {
-			return Data{}, fmt.Errorf("%w: name or address missing in person element", ErrMissingField)
-		}
-	}
-	return data, nil
+	return buffer.Bytes()
 }
 
-// Write XML file with namespaces
-func writeXML(filePath string, data Data) error {
-	file, err := os.Create(filePath)
+// Function to create XML file and handle errors
+func createXMLFile(filename string, people []Person) error {
+	// Marshal data with indentation for pretty printing
+	output, err := xml.MarshalIndent(people, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		log.Printf("Error marshaling XML: %v", err)
+		return fmt.Errorf("error marshaling XML: %v", err)
 	}
-	defer file.Close()
 
-	encoder := xml.NewEncoder(file)
-	encoder.Indent("", "  ")
-	if err := encoder.Encode(data); err != nil {
-		return fmt.Errorf("error encoding XML: %w", err)
+	// Write XML to the file
+	err = ioutil.WriteFile(filename, output, 0644)
+	if err != nil {
+		log.Printf("Error writing XML file: %v", err)
+		return fmt.Errorf("error writing XML file: %v", err)
 	}
+
 	return nil
-}
-
-func main() {
-	inputFile := "data_with_namespaces.xml"
-	outputFile := "output_with_namespaces.xml"
-
-	log.Println("Reading XML file...")
-	data, err := readXML(inputFile)
-	if err != nil {
-		if errors.Is(err, ErrMalformedXML) || errors.Is(err, ErrMissingField) {
-			log.Fatalf("Critical error with XML structure: %v", err)
-		}
-		log.Fatalf("Error reading XML: %v", err)
-	}
-
-	log.Printf("Successfully read XML: %+v\n", data)
-
-	// Modify data for demonstration
-	for i := range data.People {
-		data.People[i].Age += 1 // Increment age for all people
-		if strings.TrimSpace(data.People[i].Website) == "" {
-			data.People[i].Website = fmt.Sprintf("https://www.example.com/%s", data.People[i].Name)
-		}
-	}
-
-	log.Println("Writing updated XML file...")
-	if err := writeXML(outputFile, data); err != nil {
-		log.Fatalf("Error writing XML: %v", err)
-	}
-
-	log.Println("XML processing completed successfully!")
 }

@@ -4,54 +4,57 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 )
 
-// Callback is a function that will be executed when a specific event occurs.
-type Callback func(http.ResponseWriter, *http.Request)
+// EndpointCallback is a function type that represents an API endpoint callback
+type EndpointCallback func(http.ResponseWriter, *http.Request)
 
-// EventDispatcher holds the registered callbacks and dispatches events.
-type EventDispatcher struct {
-	routes map[string]Callback
+var endpointMap map[string]EndpointCallback
+var mu sync.Mutex
+
+func init() {
+	endpointMap = make(map[string]EndpointCallback)
 }
 
-// NewEventDispatcher creates a new EventDispatcher.
-func NewEventDispatcher() *EventDispatcher {
-	return &EventDispatcher{
-		routes: make(map[string]Callback),
+// RegisterEndpoint registers an API endpoint with a callback
+func RegisterEndpoint(path string, callback EndpointCallback) {
+	mu.Lock()
+	defer mu.Unlock()
+	endpointMap[path] = callback
+}
+
+// HandlerFunction handles incoming HTTP requests and triggers the corresponding endpoint callback
+func HandlerFunction(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+	callback, exists := endpointMap[r.URL.Path]
+	if exists {
+		callback(w, r)
+	} else {
+		http.Error(w, "Not Found", http.StatusNotFound)
 	}
 }
 
-// RegisterCallback registers a new callback for a given path.
-func (d *EventDispatcher) RegisterCallback(path string, cb Callback) {
-	d.routes[path] = cb
-}
-
-// HandleEvent dispatches an event (HTTP request) to the registered callback.
-func (d *EventDispatcher) HandleEvent(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	cb, ok := d.routes[path]
-	if !ok {
-		http.Error(w, "Not found", http.StatusNotFound)
-		return
-	}
-	cb(w, r)
-}
-
-// Main function to set up the server and handle events.
 func main() {
-	// Create a new event dispatcher
-	dispatcher := NewEventDispatcher()
-
-	// Register some callback functions for specific paths
-	dispatcher.RegisterCallback("/hello", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Hello, %s!", r.URL.Query().Get("name"))
-	})
-
-	dispatcher.RegisterCallback("/goodbye", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Goodbye, %s!", r.URL.Query().Get("name"))
-	})
+	// Register a sample endpoint callback
+	RegisterEndpoint("/hello", HelloHandler)
+	RegisterEndpoint("/goodbye", GoodbyeHandler)
 
 	// Start the HTTP server
-	http.HandleFunc("/", dispatcher.HandleEvent)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Println("Server starting on :8080")
+	err := http.ListenAndServe(":8080", http.HandlerFunc(HandlerFunction))
+	if err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
+}
+
+// HelloHandler is a callback function for the "/hello" endpoint
+func HelloHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Hello, %s!", r.URL.Query().Get("name"))
+}
+
+// GoodbyeHandler is a callback function for the "/goodbye" endpoint
+func GoodbyeHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Goodbye, %s!", r.URL.Query().Get("name"))
 }

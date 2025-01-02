@@ -2,110 +2,74 @@ package main
 
 import (
 	"encoding/xml"
-	"errors"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
-	"os"
-	"strings"
 )
 
-// Structs for XML Data
+// Define a structure to represent the XML data
 type Person struct {
-	Name    string `xml:"name" validate:"required"`
-	Age     int    `xml:"age" validate:"min=0"`
-	Address string `xml:"address" validate:"required"`
-}
-
-type Data struct {
-	XMLName xml.Name `xml:"data"`
-	People  []Person `xml:"person"`
-}
-
-// Custom Error Types
-var (
-	ErrMalformedXML = errors.New("malformed XML data")
-	ErrMissingField = errors.New("missing required XML fields")
-)
-
-// Read XML file
-func readXML(filePath string) (Data, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return Data{}, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	decoder := xml.NewDecoder(file)
-	var data Data
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return Data{}, fmt.Errorf("error reading XML token: %w", err)
-		}
-
-		switch t := token.(type) {
-		case xml.StartElement:
-			if t.Name.Local == "data" {
-				if err := decoder.DecodeElement(&data, &t); err != nil {
-					return Data{}, fmt.Errorf("failed to decode XML element: %w", err)
-				}
-			}
-		}
-	}
-
-	// Check for missing required fields
-	for _, person := range data.People {
-		if strings.TrimSpace(person.Name) == "" || strings.TrimSpace(person.Address) == "" {
-			return Data{}, fmt.Errorf("%w: name or address missing in person element", ErrMissingField)
-		}
-	}
-	return data, nil
-}
-
-// Write XML file
-func writeXML(filePath string, data Data) error {
-	file, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := xml.NewEncoder(file)
-	encoder.Indent("", "  ")
-	if err := encoder.Encode(data); err != nil {
-		return fmt.Errorf("error encoding XML: %w", err)
-	}
-	return nil
+	Name string `xml:"name"`
+	Age  int    `xml:"age"`
 }
 
 func main() {
-	inputFile := "data.xml"
-	outputFile := "output.xml"
-
-	log.Println("Reading XML file...")
-	data, err := readXML(inputFile)
+	// Parse XML file with error recovery
+	data, err := parseXMLFile("data.xml")
 	if err != nil {
-		if errors.Is(err, ErrMalformedXML) || errors.Is(err, ErrMissingField) {
-			log.Fatalf("Critical error with XML structure: %v", err)
+		log.Printf("Error parsing XML file: %v", err)
+		return
+	}
+	fmt.Println("Parsed Data:", data)
+
+	// Create XML file with error recovery
+	err = createXMLFile("output.xml", data)
+	if err != nil {
+		log.Printf("Error creating XML file: %v", err)
+	}
+}
+
+// Function to parse XML file and handle errors
+func parseXMLFile(filename string) ([]Person, error) {
+	var people []Person
+
+	// Read XML file
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("error reading file: %v", err)
+	}
+
+	// Use xml.Unmarshal to parse the XML data into the People struct
+	err = xml.Unmarshal(data, &people)
+	if err != nil {
+		// Handle specific parsing errors
+		if syntaxError, ok := err.(*xml.SyntaxError); ok {
+			log.Printf("Malformed XML syntax: %v", syntaxError)
+			return nil, fmt.Errorf("XML syntax error: %v", syntaxError)
 		}
-		log.Fatalf("Error reading XML: %v", err)
+		// Handle other errors
+		log.Printf("Error parsing XML: %v", err)
+		return nil, fmt.Errorf("error parsing XML: %v", err)
 	}
 
-	log.Printf("Successfully read XML: %+v\n", data)
+	return people, nil
+}
 
-	// Modify data for demonstration
-	for i := range data.People {
-		data.People[i].Age += 1 // Increment age for all people
+// Function to create XML file and handle errors
+func createXMLFile(filename string, people []Person) error {
+	// Marshal data with indentation for pretty printing
+	output, err := xml.MarshalIndent(people, "", "  ")
+	if err != nil {
+		log.Printf("Error marshaling XML: %v", err)
+		return fmt.Errorf("error marshaling XML: %v", err)
 	}
 
-	log.Println("Writing updated XML file...")
-	if err := writeXML(outputFile, data); err != nil {
-		log.Fatalf("Error writing XML: %v", err)
+	// Write XML to the file
+	err = ioutil.WriteFile(filename, output, 0644)
+	if err != nil {
+		log.Printf("Error writing XML file: %v", err)
+		return fmt.Errorf("error writing XML file: %v", err)
 	}
 
-	log.Println("XML processing completed successfully!")
+	return nil
 }

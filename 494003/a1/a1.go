@@ -3,105 +3,83 @@ package main
 import (
 	"encoding/xml"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"strings"
 )
 
-// Sample XML struct definition
-type Item struct {
-	Name    string `xml:"name"`
-	Quantity int    `xml:"quantity"`
+// Configuration structure for your XML
+type Config struct {
+	Server string `xml:"server"`
+	Port   int    `xml:"port"`
+	Enable bool   `xml:"enable,attr"`
 }
 
-// Function to read an XML file
-func readXMLFile(filePath string) ([]Item, error) {
+func parseXML(filePath string) (*Config, error) {
+	config := Config{}
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Printf("Error opening file: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("error opening file: %v", err)
 	}
 	defer file.Close()
 
 	decoder := xml.NewDecoder(file)
-	var items []Item
 	for {
-		token, err := decoder.Token()
+		tok, err := decoder.Token()
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			log.Printf("Error reading XML token: %v", err)
-			return nil, err
+			log.Printf("XML parsing error: %v", err)
+			continue
 		}
-		if startElement, ok := token.(xml.StartElement); ok && startElement.Name.Local == "item" {
-			var item Item
-			if err := decoder.Decode(&item); err != nil {
-				log.Printf("Error decoding item: %v", err)
-				return nil, err
+		switch se := tok.(type) {
+		case xml.StartElement:
+			err = decoder.StartElement(&se)
+			if err != nil {
+				log.Printf("XML parsing error: %v", err)
+				continue
 			}
-			items = append(items, item)
 		}
 	}
-	return items, nil
+	err = decoder.Close()
+	if err != nil {
+		return nil, fmt.Errorf("error closing decoder: %v", err)
+	}
+	return &config, nil
 }
 
-// Function to write XML data to a file
-func writeXMLFile(filePath string, items []Item) error {
+func createXML(config *Config, filePath string) error {
 	file, err := os.Create(filePath)
 	if err != nil {
-		log.Printf("Error creating file: %v", err)
-		return err
+		return fmt.Errorf("error creating file: %v", err)
 	}
 	defer file.Close()
 
 	encoder := xml.NewEncoder(file)
-	encoder.Indent("", "  ")
-	err = encoder.StartElement(xml.StartElement{Name: xml.Name{Local: "items"}})
+	encoder.Indent("  ", "    ") // Indent for pretty printing
+	err = encoder.Encode(config)
 	if err != nil {
-		log.Printf("Error starting XML encoding: %v", err)
-		return err
+		return fmt.Errorf("error encoding XML: %v", err)
 	}
-
-	for _, item := range items {
-		err = encoder.Encode(item)
-		if err != nil {
-			log.Printf("Error encoding item: %v", err)
-			return err
-		}
-	}
-
-	err = encoder.EndElement(xml.EndElement{Name: xml.Name{Local: "items"}})
-	if err != nil {
-		log.Printf("Error ending XML encoding: %v", err)
-		return err
-	}
-
 	return nil
 }
 
 func main() {
-	const filePath = "items.xml"
+	filePath := "config.xml"
 
-	// Read XML data
-	items, err := readXMLFile(filePath)
+	// Parse XML file
+	config, err := parseXML(filePath)
 	if err != nil {
-		log.Fatalf("Failed to read XML file: %v", err)
+		log.Fatalf("Failed to parse XML file: %v", err)
 	}
 
-	fmt.Printf("Read items from file: %#v\n", items)
+	log.Printf("Parsed config: Server=%s, Port=%d, Enable=%v", config.Server, config.Port, config.Enable)
 
-	// Modify items (for demonstration purposes)
-	for i, item := range items {
-		item.Quantity *= 2
-		items[i] = item
+	// Create new XML file
+	err = createXML(&Config{Server: "localhost", Port: 8080, Enable: true}, "output.xml")
+	if err != nil {
+		log.Fatalf("Failed to create XML file: %v", err)
 	}
 
-	// Write modified XML data
-	if err := writeXMLFile(filePath, items); err != nil {
-		log.Fatalf("Failed to write XML file: %v", err)
-	}
-
-	fmt.Printf("Modified items written to file.\n")
+	log.Println("XML file created successfully.")
 }

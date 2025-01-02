@@ -9,97 +9,93 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/pkg/errors"
 )
 
-// pool represents a connection pool to a Redis server.
-type pool struct {
-	rdb   *redis.Client
-	mu    sync.Mutex
-	ctx   context.Context
-	cancel context.CancelFunc
-}
+// Global variable for Redis client pool
+var redisClient *redis.Client
 
-// NewPool creates a new connection pool to the Redis server with concurrency control.
-func NewPool(addr string, concurrency int) (*pool, error) {
-	if concurrency <= 0 {
-		return nil, errors.New("concurrency should be a positive integer")
-	}
-
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr, // use default Addr
-		Password: "",   // no password set
-		DB:       0,   // use default DB
-		PoolSize: concurrency,
+// initializeRedisClient initializes the Redis client pool.
+func initializeRedisClient() {
+	redisClient = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
 	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	err := rdb.Ping(ctx).Err()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
+	// Check connection status
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
-
-	return &pool{rdb: rdb, ctx: ctx, cancel: cancel}, nil
 }
 
-// Get gets a new connection from the pool.
-func (p *pool) Get() redis.Cmdable {
-	// Let's introduce a simulated random delay to showcase thread safety and concurrency
-	delay := time.Duration(rand.Intn(100)) * time.Millisecond
-	time.Sleep(delay)
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.rdb.WithContext(p.ctx)
+// cleanupRedisClient closes the Redis client pool.
+func cleanupRedisClient() {
+	if err := redisClient.Close(); err != nil {
+		log.Printf("Error closing Redis client: %v", err)
+	}
 }
 
-// Close closes the connection pool.
-func (p *pool) Close() error {
-	p.cancel() // Cancel the context to gracefully shutdown the pool
-	return p.rdb.Close()
-}
-
-// worker performs tasks using a Redis connection from the pool.
-func worker(wg *sync.WaitGroup, pool *pool, id int) {
+// worker function that performs Redis operations concurrently.
+func worker(id int, wg *sync.WaitGroup, ctx context.Context) {
 	defer wg.Done()
+	// Acquire a lock to ensure mutual exclusion while using Redis client
+	var mutex sync.Mutex
+	mutex.Lock()
+	defer mutex.Unlock()
 
-	redisConn := pool.Get()
-	defer redisConn.Close() // Properly close the connection when the goroutine exits
+	// Use the defer keyword for resource cleanup within the worker
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			log.Printf("Worker %d: Error closing Redis client: %v", id, err)
+		}
+	}()
 
-	// Simulate some work with Redis
-	for i := 0; i < 10; i++ {
-		key := fmt.Sprintf("worker_%d_%d", id, i)
-		_, err := redisConn.Set(pool.ctx, key, "value", 0).Result()
-		if err != nil {
-			log.Printf("Error setting key %q: %v", key, err)
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Printf("Worker %d: Cancellation received. Exiting...\n", id)
 			return
+		default:
+			// Simulate work
+			time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
+
+			// Perform Redis operations
+			key := fmt.Sprintf("worker_%d_key", id)
+			err := redisClient.Set(ctx, key, fmt.Sprintf("Worker %d's value", id), 10*time.Second).Err()
+			if err != nil {
+				log.Printf("Worker %d: Error setting value in Redis: %v", id, err)
+				continue
+			}
+
+			val, err := redisClient.Get(ctx, key).Result()
+			if err != nil {
+				log.Printf("Worker %d: Error getting value from Redis: %v", id, err)
+				continue
+			}
+			fmt.Printf("Worker %d: Got value from Redis: %s\n", id, val)
 		}
 	}
 }
 
-// Example usage:
 func main() {
-	const (
-		numWorkers  = 10
-		concurrency = 10 // Redis pool size should be at least equal to concurrency
-	)
+	initializeRedisClient()
+	defer cleanupRedisClient()
 
-	// Connect to Redis using our connection pool with concurrency control
-	pool, err := NewPool("localhost:6379", concurrency)
-	if err != nil {
-		log.Fatalf("Error creating connection pool: %v", err)
-	}
-	defer pool.Close() // Clean up pool on program exit
-
+	// Number of workers to spawn
+	numWorkers := 10
 	var wg sync.WaitGroup
-	wg.Add(numWorkers)
 
-	// Start workers in parallel
+	// Create a context with a cancel function
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Ensure context is canceled upon return
+
+	// Spawn workers
+	wg.Add(numWorkers)
 	for i := 0; i < numWorkers; i++ {
-		go worker(&wg, pool, i)
+		go worker(i, &wg, ctx)
 	}
 
+	// Wait for all workers to complete
 	wg.Wait()
-	fmt.Println("All workers completed.")
-}
+	fmt.Println("All workers finished. Program exiting...")
+} 

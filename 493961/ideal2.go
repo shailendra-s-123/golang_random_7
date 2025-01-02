@@ -1,111 +1,120 @@
-
 package main
 
 import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
+	"sync"
+	"time"
 )
 
-// Middleware is a function that takes an http.Handler and returns an http.Handler.
-type Middleware func(http.Handler) http.Handler
+// EndpointCallback represents a callback for an API endpoint
+type EndpointCallback func(http.ResponseWriter, *http.Request)
 
-// EventDispatcher holds the registered handlers and dispatches events.
-type EventDispatcher struct {
-	routes map[string]http.Handler
+// Struct to store endpoint information
+type Endpoint struct {
+	Path     string
+	Callback EndpointCallback
 }
 
-// NewEventDispatcher creates a new EventDispatcher.
-func NewEventDispatcher() *EventDispatcher {
-	return &EventDispatcher{
-		routes: make(map[string]http.Handler),
+// EventHandler processes events asynchronously
+func EventHandler(event interface{}) {
+	// Simulate some asynchronous work
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("Processed event:", event)
+}
+
+var endpointMap map[string]EndpointCallback
+var mu sync.Mutex
+
+// Worker Pool to manage concurrent processing
+type WorkerPool struct {
+	Workers     int
+	EventQueue  chan interface{}
+	wg          sync.WaitGroup
+}
+
+// NewWorkerPool creates a new worker pool
+func NewWorkerPool(workers int) *WorkerPool {
+	return &WorkerPool{
+		Workers:    workers,
+		EventQueue: make(chan interface{}, 100),
 	}
 }
 
-// RegisterEndpoint registers a new endpoint with optional middleware.
-func (d *EventDispatcher) RegisterEndpoint(path string, handler http.Handler, middlewares ...Middleware) {
-	for _, middleware := range middlewares {
-		handler = middleware(handler)
-	}
-	d.routes[path] = handler
-}
-
-// HandleEvent dispatches the event (HTTP request) to the registered handler.
-func (d *EventDispatcher) HandleEvent(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	handler, ok := d.routes[path]
-	if !ok {
-		http.Error(w, "Not found", http.StatusNotFound)
-		return
-	}
-	handler.ServeHTTP(w, r)
-}
-
-// Logger is a middleware function that logs each request.
-func Logger(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Request: %s %s", r.Method, r.URL.Path)
-		next.ServeHTTP(w, r)
-	})
-}
-
-// Authenticator is a middleware function for simple authentication.
-func Authenticator(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") || authHeader[len("Bearer "):] != "secret_token" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// ErrorHandler is a middleware function that handles errors.
-func ErrorHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if err := recover(); err != nil {
-				log.Printf("Error: %v", err)
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+// Start starts the worker pool to process events
+func (wp *WorkerPool) Start() {
+	for i := 0; i < wp.Workers; i++ {
+		go func() {
+			for event := range wp.EventQueue {
+				wp.wg.Add(1)
+				EventHandler(event)
+				wp.wg.Done()
 			}
 		}()
-		next.ServeHTTP(w, r)
-	})
+	}
 }
 
-// HelloHandler is an example handler for the "/hello" endpoint.
+// Wait waits for all workers to finish
+func (wp *WorkerPool) Wait() {
+	wp.wg.Wait()
+}
+
+func init() {
+	endpointMap = make(map[string]EndpointCallback)
+}
+
+func RegisterEndpoint(path string, callback EndpointCallback) {
+	mu.Lock()
+	defer mu.Unlock()
+	endpointMap[path] = callback
+}
+
+func HandlerFunction(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+	callback, exists := endpointMap[r.URL.Path]
+	if exists {
+		callback(w, r)
+	} else {
+		http.Error(w, "Not Found", http.StatusNotFound)
+	}
+}
+
 func HelloHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "Name is required", http.StatusBadRequest)
-		return
-	}
 	fmt.Fprintf(w, "Hello, %s!", name)
+	event := fmt.Sprintf("Hello event for %s", name)
+	// Add event to the worker pool
+	workerPool.EventQueue <- event
 }
 
-// GoodbyeHandler is an example handler for the "/goodbye" endpoint.
 func GoodbyeHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "Name is required", http.StatusBadRequest)
-		return
-	}
 	fmt.Fprintf(w, "Goodbye, %s!", name)
+	event := fmt.Sprintf("Goodbye event for %s", name)
+	// Add event to the worker pool
+	workerPool.EventQueue <- event
 }
+
+var workerPool *WorkerPool
 
 func main() {
-	// Create a new event dispatcher
-	dispatcher := NewEventDispatcher()
+	// Configure the worker pool size
+	workerPool = NewWorkerPool(10)
+	workerPool.Start()
 
-	// Register the "/hello" and "/goodbye" endpoints with middleware
-	dispatcher.RegisterEndpoint("/hello", http.HandlerFunc(HelloHandler), Logger, Authenticator, ErrorHandler)
-	dispatcher.RegisterEndpoint("/goodbye", http.HandlerFunc(GoodbyeHandler), Logger, ErrorHandler)
+	// Register the endpoints
+	RegisterEndpoint("/hello", HelloHandler)
+	RegisterEndpoint("/goodbye", GoodbyeHandler)
 
-	// Set up the HTTP server
-	http.HandleFunc("/", dispatcher.HandleEvent)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	// Start the HTTP server
+	log.Println("Server starting on :8080")
+	err := http.ListenAndServe(":8080", http.HandlerFunc(HandlerFunction))
+	if err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
+
+	// Wait for all events to be processed before shutting down
+	workerPool.Wait()
 }
-
-

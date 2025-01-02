@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -34,26 +35,26 @@ func (mp *MemoryPool) Put(data *Data) {
 	mp.pool.Put(data)
 }
 
+// Optimized encode function
 func encode(data *Data) {
-	// Simulate encoding logic
-	// (for now just append "_encoded" to the data)
 	data.Chunk = append(data.Chunk, []byte("_encoded")...)
 }
 
+// Optimized decode function
 func decode(data *Data) {
-	// Simulate decoding logic
-	// (for now just strip "_encoded" from the data)
 	data.Chunk = data.Chunk[:len(data.Chunk)-8]
 }
 
+// Process data with optional parallel processing and thread safety
 func processData(pool *MemoryPool, parallel bool, wg *sync.WaitGroup) {
+	defer wg.Done()
 	data := pool.Get()
 	defer pool.Put(data)
 
 	// Simulate real-time streaming data
 	data.Chunk = []byte("raw data")
 
-	// Perform encoding and decoding
+	// Perform encoding and decoding with thread safety and reduced context switching
 	if parallel {
 		var encodeWg sync.WaitGroup
 		encodeWg.Add(1)
@@ -76,27 +77,26 @@ func processData(pool *MemoryPool, parallel bool, wg *sync.WaitGroup) {
 		decode(data)
 	}
 
-	// Print the processed data (in reality, this could be saved or further processed)
+	// Print processed data (in reality, this could be saved or further processed)
 	fmt.Printf("Processed Data: %s\n", string(data.Chunk))
 }
 
+// Benchmark serial vs parallel processing under varying loads
 func benchmark(pool *MemoryPool, parallel bool, iterations int) time.Duration {
 	start := time.Now()
 
 	var wg sync.WaitGroup
 	for i := 0; i < iterations; i++ {
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			processData(pool, parallel, &wg)
-		}()
+		go processData(pool, parallel, &wg)
 	}
 
 	wg.Wait()
 	return time.Since(start)
 }
 
-func main() {
+// Compare memory management techniques and benchmark performance
+func memoryManagementComparison() {
 	pool := NewMemoryPool()
 
 	// Benchmark serial processing (without parallelism)
@@ -104,10 +104,14 @@ func main() {
 	serialDuration := benchmark(pool, false, 10)
 	fmt.Printf("Time taken (serial): %v\n", serialDuration)
 
-	// Benchmark parallel processing
+	// Benchmark parallel processing (with memory pooling)
 	fmt.Println("\nBenchmarking parallel processing...")
 	parallelDuration := benchmark(pool, true, 10)
 	fmt.Printf("Time taken (parallel): %v\n", parallelDuration)
+}
 
-	// You can adjust the number of iterations based on the load you want to simulate
+func main() {
+	memoryManagementComparison()
+
+	// Further optimize by experimenting with different chunk sizes, pooling strategies, or goroutine management.
 }

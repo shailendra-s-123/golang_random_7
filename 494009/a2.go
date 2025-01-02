@@ -5,104 +5,104 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/gomodule/redigo/redis"
-	"github.com/google/uuid"
 )
 
-type pool struct {
-	rdb *redis.Client
-}
-
-// NewPool creates a new connection pool to the Redis server.
-func NewPool(addr string) (*pool, error) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr, // use default Addr
-		Password: "",   // no password set
-		DB:       0,   // use default DB
+// createRedisClient creates a Redis client with the given parameters and returns it.
+func createRedisClient() *redis.Client {
+	client := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379", // Redis server address
+		Password: "",               // No password set
+		DB:       0,                // Default DB
 	})
-	_, err := rdb.Ping(context.Background()).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
+
+	// Ensure Redis server is reachable
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
-	return &pool{rdb: rdb}, nil
+
+	return client
 }
 
-// Get gets a new connection from the pool.
-func (p *pool) Get() redis.Cmdable {
-	return p.rdb.WithContext(context.Background())
-}
-
-// Close closes the connection pool.
-func (p *pool) Close() error {
-	return p.rdb.Close()
-}
-
-type operation struct {
-	pool *pool
-	key  string
-	value string
-	ctx    context.Context
-}
-
-func (op *operation) execute() {
+// cleanup handles the cleanup of resources, ensuring safe deallocation.
+func cleanup(client *redis.Client) {
+	// Using defer to ensure that Redis connection is closed after all operations
 	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Recovered: %v", r)
+		if err := client.Close(); err != nil {
+			log.Printf("Error closing Redis client: %v", err)
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(op.ctx, 1*time.Second)
-	defer cancel()
-
-	redisConn := op.pool.Get()
-	defer redisConn.Close()
-
-	_, err := redisConn.Set(ctx, op.key, op.value, 0).Result()
-	if err != nil {
-		log.Printf("Error setting key %s: %v", op.key, err)
-		return
-	}
-
-	val, err := redisConn.Get(ctx, op.key).Result()
-	if err != nil {
-		log.Printf("Error getting key %s: %v", op.key, err)
-		return
-	}
-
-	log.Printf("Value for key %s is %s", op.key, val)
+	// Simulating additional cleanup tasks...
+	fmt.Println("Performing additional cleanup tasks...")
 }
 
-func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	pool, err := NewPool("localhost:6379")
-	if err != nil {
-		log.Fatalf("Error connecting to Redis: %v", err)
-	}
-	defer pool.Close() // Ensure the pool is closed
-
-	var wg sync.WaitGroup
-	var numOperations int32 = 100
-
-	for i := 0; i < int(numOperations); i++ {
-		op := &operation{
-			pool: pool,
-			key:  fmt.Sprintf("key_%s", uuid.New()),
-			value: fmt.Sprintf("value_%s", uuid.New()),
-			ctx: ctx,
+// performRedisOperation performs a single Redis operation with error handling.
+func performRedisOperation(ctx context.Context, client *redis.Client) {
+	// Using defer to close connection in case of error
+	defer func() {
+		if err := client.Close(); err != nil {
+			log.Printf("Error closing Redis client: %v", err)
 		}
-		wg.Add(1)
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("Operation canceled due to context")
+		return
+	default:
+	}
+
+	err := client.Set(ctx, "foo", "bar", 10*time.Second).Err()
+	if err != nil {
+		log.Printf("Error setting value in Redis: %v", err)
+		return
+	}
+	fmt.Println("Set 'foo' to 'bar' in Redis.")
+
+	val, err := client.Get(ctx, "foo").Result()
+	if err != nil {
+		log.Printf("Error getting value from Redis: %v", err)
+		return
+	}
+	fmt.Printf("Got value from Redis: %s\n", val)
+}
+
+// concurrentRedisOperations performs Redis operations concurrently.
+func concurrentRedisOperations(ctx context.Context, wg *sync.WaitGroup, numGoroutines int) {
+	defer wg.Done()
+	
+	for i := 0; i < numGoroutines; i++ {
+		// Create a new Redis client for each goroutine
+		client := createRedisClient()
+
 		go func() {
-			defer wg.Done()
-			op.execute()
+			// Perform Redis operation
+			performRedisOperation(ctx, client)
+			// Cleanup resources
+			cleanup(client)
 		}()
 	}
+}
 
+// main function that demonstrates concurrent Redis operations with defer
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel() // Cancel the context on completion
+
+	var wg sync.WaitGroup
+	// Set number of concurrent goroutines
+	numGoroutines := 10
+	wg.Add(numGoroutines)
+
+	// Start concurrent operations
+	for i := 0; i < numGoroutines; i++ {
+		go concurrentRedisOperations(ctx, &wg, numGoroutines)
+	}
+
+	// Wait for all goroutines to finish
 	wg.Wait()
-	log.Printf("Completed %d operations", numOperations)
+	fmt.Println("All operations completed.")
 }

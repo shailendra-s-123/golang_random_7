@@ -1,100 +1,81 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"log"
+	"math/rand"
 	"sync"
-	"time"
+	//	"time"
 )
 
-// Define the callback type
-type DataCallback func(data []byte) ([]byte, error)
-
-// Simulate an encoding function
-func encodeData(data []byte) ([]byte, error) {
-	// Simulate encoding delay
-	time.Sleep(10 * time.Millisecond)
-	return append([]byte("encoded:"), data...), nil
+// Data represents a simple data structure to be encoded and decoded
+type Data struct {
+	Value int32
 }
 
-// Simulate a decoding function
-func decodeData(data []byte) ([]byte, error) {
-	// Simulate decoding delay
-	time.Sleep(10 * time.Millisecond)
-	return data[8:], nil
+// Encoder is a callback function type for encoding data
+type Encoder func(d Data) []byte
+
+// Decoder is a callback function type for decoding data
+type Decoder func(b []byte) (Data, error)
+
+// Function to encode Data to a byte slice
+func encode(d Data) []byte {
+	buf := bytes.NewBuffer(nil)
+	if err := binary.Write(buf, binary.LittleEndian, d); err != nil {
+		log.Fatalf("Error encoding data: %v", err)
+	}
+	return buf.Bytes()
 }
 
-// Function to process data with callbacks for encoding/decoding
-func processData(stream [][]byte, callback DataCallback, wg *sync.WaitGroup, resultChan chan<- []byte) {
+// Function to decode a byte slice back to Data
+func decode(b []byte) (Data, error) {
+	var d Data
+	if err := binary.Read(bytes.NewReader(b), binary.LittleEndian, &d); err != nil {
+		return Data{}, err
+	}
+	return d, nil
+}
+
+// Function to simulate real-time data generation (data stream)
+func generateData(wg *sync.WaitGroup, ch chan Data) {
 	defer wg.Done()
-	for _, data := range stream {
-		transformedData, err := callback(data)
-		if err != nil {
-			fmt.Println("Error processing data:", err)
-			continue
-		}
-		resultChan <- transformedData
+	for i := 0; i < 1000; i++ {
+		ch <- Data{Value: rand.Int31()}
 	}
+	close(ch)
 }
 
-// Function to optimize using concurrency
-func processStreamConcurrently(stream [][]byte, callback DataCallback) ([]byte, error) {
-	var wg sync.WaitGroup
-	resultChan := make(chan []byte, len(stream))
-	
-	// Split work into chunks and process concurrently
-	chunkSize := len(stream) / 4 // Process in 4 concurrent workers
-	for i := 0; i < 4; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
-		if i == 3 {
-			end = len(stream)
+// Function to process data using callbacks for encoding and decoding
+func processData(wg *sync.WaitGroup, ch chan Data, encoder Encoder, decoder Decoder) {
+	defer wg.Done()
+	for data := range ch {
+		encodedData := encoder(data)   // Encode the data
+		_, err := decoder(encodedData) // Decode the data
+		if err != nil {
+			log.Printf("Error decoding data: %v", err)
 		}
-		wg.Add(1)
-		go processData(stream[start:end], callback, &wg, resultChan)
 	}
-
-	// Wait for all workers to finish
-	wg.Wait()
-	close(resultChan)
-
-	// Collect results from the channel
-	var result []byte
-	for transformedData := range resultChan {
-		result = append(result, transformedData...)
-	}
-	return result, nil
 }
 
 func main() {
-	// Simulating a large data stream
-	dataStream := make([][]byte, 1000)
-	for i := 0; i < 1000; i++ {
-		dataStream[i] = []byte(fmt.Sprintf("data-%d", i))
-	}
+	// Channel for simulating the data stream
+	dataChannel := make(chan Data, 1000)
+	var wg sync.WaitGroup
 
-	// Measure start time
-	startTime := time.Now()
+	// Start data generation in a goroutine
+	wg.Add(1)
+	go generateData(&wg, dataChannel)
 
-	// Process data concurrently with encoding
-	encodedData, err := processStreamConcurrently(dataStream, encodeData)
-	if err != nil {
-		fmt.Println("Error encoding data:", err)
-		return
-	}
+	// Start data processing in a goroutine with callbacks
+	wg.Add(1)
+	go processData(&wg, dataChannel, encode, decode)
 
-	// Re-structure the data to pass as [][]byte for decoding
-	// Each element of encodedData should be split into a single item slice for decoding
-	encodedDataChunks := [][]byte{encodedData}
+	// Wait for all goroutines to finish
+	wg.Wait()
 
-	// Process data concurrently with decoding
-	decodedData, err := processStreamConcurrently(encodedDataChunks, decodeData)
-	if err != nil {
-		fmt.Println("Error decoding data:", err)
-		return
-	}
-
-	// Measure end time
-	endTime := time.Now()
-	fmt.Printf("Total processing time: %v\n", endTime.Sub(startTime))
-	fmt.Printf("Decoded Data: %s\n", string(decodedData[:100])) // Display part of decoded data for verification
+	fmt.Println("Data processing completed.")
 }
+

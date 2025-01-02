@@ -1,68 +1,71 @@
 package main
 
 import (
-	"encoding/xml"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"os"
-
-	"gopkg.in/go-playground/validator.v9"
+    "encoding/xml"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "os"
 )
 
+// Define a structure to represent the XML data
 type Person struct {
-	Name    string `xml:"name,attr" validate:"required"`
-	Age     int    `xml:"age,attr" validate:"min=0"`
-	Address string `xml:"address" validate:"required"`
-}
-
-type Data struct {
-	XMLName xml.Name  `xml:"data"`
-	People  []Person `xml:"person"`
+    Name string `xml:"name"`
+    Age  int    `xml:"age"`
 }
 
 func main() {
-	// Validator for XML data
-	validate := validator.New()
+    // Parse XML file with error recovery
+    data, err := parseXMLFile("data.xml")
+    if err != nil {
+        log.Printf("Error parsing XML file: %v", err)
+        return
+    }
+    fmt.Println("Parsed Data:", data)
 
-	// Read XML file
-	xmlFile, err := os.Open("data.xml")
-	if err != nil {
-		log.Fatalf("Error opening file: %v", err)
-	}
-	defer xmlFile.Close()
-
-	// Read the entire file content
-	content, err := ioutil.ReadAll(xmlFile)
-	if err != nil {
-		log.Fatalf("Error reading file: %v", err)
-	}
-
-	// Parse XML data
-	var data Data
-	err = xml.Unmarshal(content, &data)
-	if err != nil {
-		log.Fatalf("Error parsing XML: %v", err)
-	}
-
-	// Validate XML data
-	if err := validate.Struct(data); err != nil {
-		log.Fatalf("Validation error: %v", err)
-	}
-
-	// Write XML file
-	outFile, err := os.Create("output.xml")
-	if err != nil {
-		log.Fatalf("Error creating file: %v", err)
-	}
-	defer outFile.Close()
-
-	// Encode XML data
-	enc := xml.NewEncoder(outFile)
-	enc.Indent("  ", "    ")
-	if err := enc.Encode(data); err != nil {
-		log.Fatalf("Error encoding XML: %v", err)
-	}
-
-	fmt.Println("XML file read, validated, and written successfully.")
+    // Create XML file with error recovery
+    err = createXMLFile("output.xml", data)
+    if err != nil {
+        log.Printf("Error creating XML file: %v", err)
+    }
 }
+
+func parseXMLFile(filename string) ([]Person, error) {
+    var people []Person
+
+    data, err := ioutil.ReadFile(filename)
+    if err != nil {
+        return nil, err
+    }
+
+    // Use xml.Unmarshal to parse the XML data into the People struct
+    err = xml.Unmarshal(data, &people)
+    if err != nil {
+        // Check for specific parsing errors like malformed tags
+        if syntaxError, ok := err.(*xml.SyntaxError); ok {
+            log.Printf("Malformed XML syntax at byte %d: %v", syntaxError.Offset, err)
+            return nil, err
+        }
+        // Handle other parsing errors
+        log.Printf("Error parsing XML: %v", err)
+        return nil, err
+    }
+
+    return people, nil
+}
+
+func createXMLFile(filename string, people []Person) error {
+    output, err := xml.MarshalIndent(people, "", "  ")
+    if err != nil {
+        log.Printf("Error marshaling XML: %v", err)
+        return err
+    }
+
+    err = ioutil.WriteFile(filename, output, 0644)
+    if err != nil {
+        log.Printf("Error writing XML file: %v", err)
+        return err
+    }
+
+    return nil
+} 

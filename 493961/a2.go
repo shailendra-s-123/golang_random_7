@@ -4,106 +4,89 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
-	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
-// Middleware is a function that takes another function as an argument and returns a function.
-type Middleware func(http.Handler) http.Handler
+// EndpointCallback is a function type that represents an API endpoint callback
+type EndpointCallback func(http.ResponseWriter, *http.Request)
 
-// Callback is a function that will be executed when a specific event occurs.
-type Callback func(http.ResponseWriter, *http.Request)
+var endpointMap map[string]EndpointCallback
+var mu sync.Mutex
 
-// EventDispatcher holds the registered callbacks and dispatches events.
-type EventDispatcher struct {
-	routes map[string]Callback
+func init() {
+	endpointMap = make(map[string]EndpointCallback)
 }
 
-// NewEventDispatcher creates a new EventDispatcher.
-func NewEventDispatcher() *EventDispatcher {
-	return &EventDispatcher{
-		routes: make(map[string]Callback),
+// RegisterEndpoint registers an API endpoint with a callback
+func RegisterEndpoint(path string, callback EndpointCallback) {
+	mu.Lock()
+	defer mu.Unlock()
+	endpointMap[path] = callback
+}
+
+// HandlerFunction handles incoming HTTP requests and triggers the corresponding endpoint callback
+func HandlerFunction(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+	callback, exists := endpointMap[r.URL.Path]
+	if exists {
+		callback(w, r)
+	} else {
+		http.Error(w, "Not Found", http.StatusNotFound)
 	}
 }
 
-// RegisterCallback registers a new callback for a given path, optionally with middleware.
-func (d *EventDispatcher) RegisterCallback(path string, cb Callback, middlewares ...Middleware) {
-	h := cb
-	for _, middleware := range middlewares {
-		h = middleware(h)
-	}
-	d.routes[path] = h
+// EventHandler processes an event asynchronously
+func EventHandler(event interface{}) {
+	atomic.AddInt32(&eventsProcessed, 1)
+	time.Sleep(time.Duration(atomic.LoadInt32(&eventDelay)) * time.Millisecond)
+	fmt.Println("Processed event:", event)
 }
 
-// HandleEvent dispatches an event (HTTP request) to the registered callback.
-func (d *EventDispatcher) HandleEvent(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	cb, ok := d.routes[path]
-	if !ok {
-		http.Error(w, "Not found", http.StatusNotFound)
-		return
-	}
-	cb(w, r)
-}
+var (
+	events       chan interface{}
+	workerPool   *sync.WorkerPool
+	eventsProcessed int32
+	eventDelay   int32
+)
 
-// LoggingMiddleware logs each request.
-func LoggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[INFO] %s %s", r.Method, r.URL.Path)
-		next.ServeHTTP(w, r)
-	})
-}
-
-// AuthenticationMiddleware checks for an API key in the query parameters.
-func AuthenticationMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.URL.Query().Get("api_key")
-		if apiKey != "secret_api_key" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// ErrorHandlingMiddleware catches any error and returns a 500 status code.
-func ErrorHandlingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if err := recover(); err != nil {
-				log.Printf("[ERROR] %+v", err)
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
-			}
-		}()
-		next.ServeHTTP(w, r)
-	})
-}
-
-// Main function to set up the server and handle events.
 func main() {
-	// Create a new event dispatcher
-	dispatcher := NewEventDispatcher()
+	// Configure worker pool size and event delay
+	workerPoolSize := 10
+	workerPool = sync.NewWorkerPool(workerPoolSize)
+	eventDelay = 50
 
-	// Register some callback functions for specific paths with middleware
-	dispatcher.RegisterCallback("/hello", func(w http.ResponseWriter, r *http.Request) {
-		name := r.URL.Query().Get("name")
-		if name == "" {
-			http.Error(w, "Name is required", http.StatusBadRequest)
-			return
+	// Register sample endpoints
+	RegisterEndpoint("/hello", HelloHandler)
+	RegisterEndpoint("/goodbye", GoodbyeHandler)
+
+	// Start event worker goroutines
+	go func() {
+		for event := range events {
+			workerPool.Submit(func() { EventHandler(event) })
 		}
-		fmt.Fprintf(w, "Hello, %s!", name)
-	}, LoggingMiddleware, AuthenticationMiddleware, ErrorHandlingMiddleware)
+	}()
 
-	dispatcher.RegisterCallback("/goodbye", func(w http.ResponseWriter, r *http.Request) {
-		name := r.URL.Query().Get("name")
-		if name == "" {
-			http.Error(w, "Name is required", http.StatusBadRequest)
-			return
-		}
-		fmt.Fprintf(w, "Goodbye, %s!", name)
-	}, LoggingMiddleware, ErrorHandlingMiddleware)
+	// Start HTTP server
+	log.Println("Server starting on :8080")
+	err := http.ListenAndServe(":8080", http.HandlerFunc(HandlerFunction))
+	if err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
 
-	// Start the HTTP server
-	http.HandleFunc("/", dispatcher.HandleEvent)
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	workerPool.Wait()
+}
+
+// HelloHandler is a callback function for the "/hello" endpoint
+func HelloHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Hello, %s!", r.URL.Query().Get("name"))
+	events <- r.URL.Query().Get("name")
+}
+
+// GoodbyeHandler is a callback function for the "/goodbye" endpoint
+func GoodbyeHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Goodbye, %s!", r.URL.Query().Get("name"))
+	events <- r.URL.Query().Get("name")
 }
