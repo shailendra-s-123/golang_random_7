@@ -1,83 +1,48 @@
-package main
-
-import (
-	"fmt"
-	"math/rand"
-	"sync"
-	"time"
+package main  
+import (  
+    "fmt"
+    "math/rand"
+    "runtime"
+    "sync"
+    "time"
 )
 
-func simulateCPUBoundTask(wg *sync.WaitGroup, id int, duration time.Duration) {
-	defer wg.Done()
-	fmt.Printf("CPU-bound Goroutine %d: Starting...\n", id)
-
-	// Simulate CPU-bound work by performing a series of calculations
-	startTime := time.Now()
-	for startTime.Add(duration) .After(time.Now()) {
-		for i := 0; i < 1000000; i++ {
-			// Do some CPU work
-		}
-	}
-
-	fmt.Printf("CPU-bound Goroutine %d: Finished.\n", id)
+func simulateIOTask(delay time.Duration, start time.Time, wg *sync.WaitGroup, index int) {  
+    ioWaitStart := time.Now()
+    time.Sleep(delay) // Simulate I/O wait
+    ioWaitDuration := time.Since(ioWaitStart)
+    elapsed := time.Since(start)
+    fmt.Printf("Goroutine %d finished in: %s (I/O wait: %s)\n", index, elapsed, ioWaitDuration)
+    wg.Done()
 }
 
-func simulateIOBoundTask(wg *sync.WaitGroup, id int, duration time.Duration) {
-	defer wg.Done()
-	fmt.Printf("I/O-bound Goroutine %d: Starting...\n", id)
+func main() {  
+    rand.Seed(time.Now().UnixNano())
+    const numIOTasks = 10000 // Increased number of tasks for better analysis
+    var numConcurrent = []int{1, 5, 10, 20, 50, 100, 200, 500}
 
-	// Simulate I/O operation by introducing random sleeps
-	startTime := time.Now()
-	for startTime.Add(duration) .After(time.Now()) {
-		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
-	}
+    for _, concurrency := range numConcurrent {
+        var wg sync.WaitGroup
+        var activeGoroutines int
+        var ioWaitTotal time.Duration
 
-	fmt.Printf("I/O-bound Goroutine %d: Finished.\n", id)
-}
+        start := time.Now()
+        go func() {
+            for {
+                runtime.Gosched() // Yield control back to the scheduler
+                activeGoroutines = runtime.NumGoroutine()
+                fmt.Printf("Active Goroutines: %d\n", activeGoroutines)
+                time.Sleep(10 * time.Millisecond)
+            }
+        }()
 
-func main() {
-	// Number of CPU-bound goroutines
-	numCPUBoundGoroutines := 5
-	// Number of I/O-bound goroutines
-	numIOBoundGoroutines := 5
-	// Duration of the CPU-bound task
-	cpuDuration := time.Second * 3 // 3 seconds for each CPU-bound task
-	// Duration of the I/O-bound task
-	ioDuration := time.Second * 5 // 5 seconds for each I/O-bound task
-
-	// Create wait groups for CPU-bound and I/O-bound tasks
-	var cpuWg sync.WaitGroup
-	var ioWg sync.WaitGroup
-
-	// Start CPU-bound goroutines
-	fmt.Println("Starting CPU-bound tasks...")
-	startTime := time.Now()
-	for i := 0; i < numCPUBoundGoroutines; i++ {
-		cpuWg.Add(1)
-		go simulateCPUBoundTask(&cpuWg, i+1, cpuDuration)
-	}
-	
-	// Start I/O-bound goroutines
-	fmt.Println("Starting I/O-bound tasks...")
-	for i := 0; i < numIOBoundGoroutines; i++ {
-		ioWg.Add(1)
-		go simulateIOBoundTask(&ioWg, i+1, ioDuration)
-	}
-
-	// Wait for all CPU-bound goroutines to finish
-	fmt.Println("Waiting for CPU-bound tasks to complete...")
-	cpuWg.Wait()
-
-	// Wait for all I/O-bound goroutines to finish
-	fmt.Println("Waiting for I/O-bound tasks to complete...")
-	ioWg.Wait()
-
-	// Calculate total execution time
-	endTime := time.Now()
-	totalTime := endTime.Sub(startTime)
-
-	fmt.Printf("\nTotal execution time: %v\n", totalTime)
-	fmt.Printf("CPU-bound tasks: %d, I/O-bound tasks: %d\n", numCPUBoundGoroutines, numIOBoundGoroutines)
-	fmt.Printf("Simulated CPU-bound duration per task: %v\n", cpuDuration)
-	fmt.Printf("Simulated I/O-bound duration per task: %v\n", ioDuration)
-}
+        for i := 0; i < numIOTasks; i++ {
+            delay := time.Duration(rand.Intn(1000)) * time.Millisecond
+            wg.Add(1)
+            go simulateIOTask(delay, start, &wg, i)
+        }
+        wg.Wait()
+        elapsed := time.Since(start)
+        fmt.Printf("Experienced %d concurrent tasks: Total execution time = %s, Total I/O wait = %s\n", concurrency, elapsed, ioWaitTotal)
+    }
+}  

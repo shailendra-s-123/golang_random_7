@@ -2,72 +2,75 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-var sharedCounter int
-var sharedCounterMutex sync.Mutex
-
-func simulateIO(wg *sync.WaitGroup, id int, duration time.Duration) {
+// Simulate an I/O-bound task by introducing a delay
+func simulateIOTask(delay time.Duration, start time.Time, wg *sync.WaitGroup, index int, activeGoroutines *int64, ioWaitTimes chan<- time.Duration) {
 	defer wg.Done()
-	// Simulate I/O operation by sleeping
-	fmt.Printf("Goroutine %d (I/O): Simulating I/O operation...\n", id)
-	time.Sleep(duration)
-	fmt.Printf("Goroutine %d (I/O): I/O operation completed.\n", id)
-}
+	defer func() {
+		atomic.AddInt64(activeGoroutines, -1)
+	}()
+	atomic.AddInt64(activeGoroutines, 1)
 
-func simulateCPU(wg *sync.WaitGroup, id int, iterations int) {
-	defer wg.Done()
-	// Simulate CPU-bound operation by performing busy work
-	fmt.Printf("Goroutine %d (CPU): Performing CPU-bound operations...\n", id)
-	for i := 0; i < iterations; i++ {
-		// Lock the mutex for shared resource access
-		sharedCounterMutex.Lock()
-		sharedCounter++
-		sharedCounterMutex.Unlock()
-	}
-	fmt.Printf("Goroutine %d (CPU): CPU-bound operations completed.\n", id)
+	// Record the time before starting the sleep
+	beforeIO := time.Now()
+	time.Sleep(delay)
+	afterIO := time.Now()
+
+	// Calculate I/O wait time
+	ioWaitTime := afterIO.Sub(beforeIO)
+
+	// Log the number of active goroutines
+	fmt.Printf("Goroutine %d active, I/O wait time: %s\n", index, ioWaitTime)
+
+	// Send I/O wait time to the channel for further analysis
+	ioWaitTimes <- ioWaitTime
 }
 
 func main() {
-	// Number of goroutines to run for each type
-	numIOGoroutines := 10
-	numCPUGoroutines := 10
-	// Duration of the I/O operation
-	ioDuration := time.Second * 2 // 2 seconds for each I/O operation
-	// Iterations for CPU-bound operations
-	cpuIterations := 1_000_000 // 1 million iterations
+	rand.Seed(time.Now().UnixNano())
 
-	// Create wait groups to track the goroutines
-	var ioWG sync.WaitGroup
-	var cpuWG sync.WaitGroup
+	const numIOTasks = 100 // Number of I/O-bound tasks
+	var numConcurrent = []int{1, 5, 10, 20, 50, 100} // Different levels of concurrency
 
-	// Start I/O-bound goroutines
-	startTime := time.Now()
-	for i := 0; i < numIOGoroutines; i++ {
-		ioWG.Add(1)
-		go simulateIO(&ioWG, i+1, ioDuration)
+	// For each level of concurrency, perform an experiment
+	for _, concurrency := range numConcurrent {
+		var wg sync.WaitGroup
+		activeGoroutines := int64(0)
+		ioWaitTimes := make(chan<- time.Duration, numIOTasks)
+
+		start := time.Now()
+
+		// Create a limited channel to control concurrency
+		goroutineChan := make(chan struct{}, concurrency)
+
+		// Create and start goroutines for the tasks
+		for i := 0; i < numIOTasks; i++ {
+			delay := time.Duration(rand.Intn(1000)) * time.Millisecond // Random delay up to 1 second
+			wg.Add(1)
+			go func() {
+				// Wait to enter the goroutine channel to limit concurrency
+				goroutineChan <- struct{}{}
+				defer func() { <-goroutineChan }()
+
+				simulateIOTask(delay, start, &wg, i, &activeGoroutines, ioWaitTimes)
+			}()
+		}
+
+		wg.Wait()
+
+		elapsed := time.Since(start)
+		fmt.Printf("Experienced %d concurrent tasks: Total execution time = %s\n", concurrency, elapsed)
+
+		// Analyze I/O wait times
+		var totalIOWait time.Duration
+		for waitTime := range ioWaitTimes {
+			totalIOWait += waitTime
+		}
+		fmt.Printf("Average I/O wait time per task: %s\n", totalIOWait/time.Duration(numIOTasks))
 	}
-
-	// Start CPU-bound goroutines
-	for i := 0; i < numCPUGoroutines; i++ {
-		cpuWG.Add(1)
-		go simulateCPU(&cpuWG, i+1, cpuIterations)
-	}
-
-	// Wait for all I/O-bound and CPU-bound goroutines to finish
-	ioWG.Wait()
-	cpuWG.Wait()
-
-	// Calculate total execution time
-	endTime := time.Now()
-	totalTime := endTime.Sub(startTime)
-
-	fmt.Printf("Total execution time: %v\n", totalTime)
-	fmt.Printf("Number of I/O-bound goroutines: %d\n", numIOGoroutines)
-	fmt.Printf("Number of CPU-bound goroutines: %d\n", numCPUGoroutines)
-	fmt.Printf("Simulated I/O duration per goroutine: %v\n", ioDuration)
-	fmt.Printf("Simulated CPU iterations per goroutine: %d\n", cpuIterations)
-	fmt.Printf("Shared counter value after completion: %d\n", sharedCounter)
 }

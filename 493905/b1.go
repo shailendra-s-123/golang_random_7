@@ -1,46 +1,35 @@
-package main
-
-import (
-	"fmt"
-	"math/rand"
-	"sync"
-	"time"
+package main  
+import (  
+    "fmt"
+    "math/rand"
+    "sync"
+    "time"
 )
 
-func ioBoundGoroutine(id int, wg *sync.WaitGroup, numIterations int, waitTimeMillis int) {
-	defer wg.Done()
+const (  
+    numTasks      = 10000
+    numGoroutines = 10
+    maxDelay      = 10 * time.Millisecond
+)
 
-	for i := 0; i < numIterations; i++ {
-		// Simulate I/O operation with a random wait
-		time.Sleep(time.Duration(rand.Intn(waitTimeMillis)) * time.Millisecond)
-		// Record goroutine completion time
-		fmt.Printf("Goroutine %d: Iteration %d completed at %v\n", id, i, time.Now())
-	}
+func ioBoundTask(wg *sync.WaitGroup, id int, startTime time.Time) {  
+    defer wg.Done()
+    delay := time.Duration(rand.Intn(int(maxDelay)))
+    time.Sleep(delay)
+    endTime := time.Now()
+    fmt.Printf("Goroutine %d: Delay: %v, Execution time: %v\n", id, delay, endTime.Sub(startTime))
 }
 
-func main() {
-	rand.Seed(time.Now().UnixNano())
-
-	numGoroutines := 10
-	numIterations := 5
-	waitTimeMillis := 100
-
-	var wg sync.WaitGroup
-
-	startTime := time.Now()
-
-	// Create and run I/O-bound goroutines
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go ioBoundGoroutine(i, &wg, numIterations, waitTimeMillis)
-	}
-
-	// Wait for all goroutines to complete
-	wg.Wait()
-
-	endTime := time.Now()
-
-	totalExecutionTime := endTime.Sub(startTime)
-
-	fmt.Printf("\nTotal execution time: %v\n", totalExecutionTime)
-}  
+func main() {  
+    rand.Seed(time.Now().UnixNano())
+    var wg sync.WaitGroup
+    startTime := time.Now()
+    wg.Add(numTasks)
+    for i := 0; i < numTasks; i++ {
+        go ioBoundTask(&wg, i, startTime)
+    }
+    wg.Wait()
+    endTime := time.Now()
+    totalExecutionTime := endTime.Sub(startTime)
+    fmt.Printf("Total execution time: %v\n", totalExecutionTime)
+}

@@ -2,55 +2,58 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"strconv"
+	"strings"
 )
 
-type Formatter interface {
-	Format(template string, args ...interface{}) (string, error)
-}
-
-type SafeFormatter struct{}
-
-func (sf *SafeFormatter) Format(template string, args ...interface{}) (string, error) {
-	_, err := fmt.Printf(template, args...)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(template, args...), nil
-}
-
-type User struct {
-	ID   int
-	Name string
-}
-
-type GreetingService struct {
-	formatter Formatter
-}
-
-func NewGreetingService(formatter Formatter) *GreetingService {
-	return &GreetingService{formatter: formatter}
-}
-
-func (gs *GreetingService) GreetUser(user *User) (string, error) {
-	return gs.formatter.Format("Hello, %s (ID: %d)!", user.Name, user.ID)
-}
-
 func main() {
-	formatter := &SafeFormatter{}
-	gs := NewGreetingService(formatter)
+	// Demonstrate safe string formatting using different functions
+	safeStringFormattingDemo()
 
-	user := &User{ID: 1, Name: "Alice"}
-	greeting, err := gs.GreetUser(user)
-	if err != nil {
-		log.Fatalf("Error greeting user: %v", err)
-	}
-	fmt.Println(greeting)
+	// Handle user input and format the result
+	handleUserInput()
+}
 
-	user2 := &User{ID: 2, Name: "Bob"}
-	greeting2, err := gs.GreetUser(user2)
+func safeStringFormattingDemo() {
+	// Use Sprintf for safe string formatting
+	name := "Alice"
+	age := 25
+	result := fmt.Sprintf("Hello, my name is %s and I am %d years old.", name, age)
+	fmt.Println(result)
+
+	// Use Sscanf for safe parsing of user input
+	var input string
+	fmt.Print("Enter your name and age: ")
+	_, err := fmt.Sscanf(input, "%s %d", &name, &age)
 	if err != nil {
-		log.Fatalf("Error greeting user: %v", err)
+		fmt.Println("Error parsing input:", err)
+		return
 	}
-	fmt.Println(greeting2)
+	fmt.Printf("Hello, %s! You are %d years old.\n", name, age)
+
+	// Use Join for safe concatenation of strings
+	parts := []string{"Hello", ", ", "world", "!"}
+	joined := strings.Join(parts, "")
+	fmt.Println(joined)
+}
+
+func handleUserInput() {
+	var input string
+	fmt.Print("Enter a number: ")
+	_, err := fmt.Scanln(&input)
+	if err != nil {
+		fmt.Println("Error reading input:", err)
+		return
+	}
+
+	// Validate user input as a number
+	num, err := strconv.Atoi(input)
+	if err != nil {
+		fmt.Println("Invalid input:", err)
+		return
+	}
+
+	// Perform calculations and format the result
+	result := fmt.Sprintf("The square of %d is %d.\n", num, num*num)
+	fmt.Print(result)
 }
