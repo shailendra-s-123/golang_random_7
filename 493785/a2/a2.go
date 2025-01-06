@@ -1,98 +1,72 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"errors"
-	"os"
-	"github.com/sirupsen/logrus"
+	"log"
+	"math/rand"
+	"time"
 )
 
-// Custom error types for better traceability
-type TimeoutError struct {
-	msg string
-}
-
-func (e *TimeoutError) Error() string {
-	return fmt.Sprintf("Timeout error: %s", e.msg)
-}
-
-type ProcessingError struct {
+// Define a custom error type for clarity and traceability
+type ProcessError struct {
 	message string
-	cause   error
+	cause   error // to support chaining of errors
 }
 
-func (e *ProcessingError) Error() string {
+func (e *ProcessError) Error() string {
 	if e.cause != nil {
-		return fmt.Sprintf("ProcessingError: %s (cause: %v)", e.message, e.cause)
+		return fmt.Sprintf("ProcessError: %s (cause: %v)", e.message, e.cause)
 	}
-	return fmt.Sprintf("ProcessingError: %s", e.message)
+	return fmt.Sprintf("ProcessError: %s", e.message)
 }
 
-// Function that applies a callback to each item, propagating errors
-func ProcessItems(items []string, callback func(string) error) error {
-	logrus.Info("Starting processing of items...")
-	defer logrus.Info("Processing completed.")
-
+// Function that applies a callback to each item in a list with retry mechanism
+func ProcessItemsWithRetry(items []string, callback func(context.Context, string) error, retries int) error {
 	for _, item := range items {
-		logrus.WithFields(logrus.Fields{"item": item}).Info("Processing item...")
-
-		err := callback(item)
-		if err != nil {
-			// Propagating the error with context (item that failed)
-			return fmt.Errorf("error processing item %s: %w", item, err)
+		for retryCount := 0; retryCount <= retries; retryCount++ {
+			ctx := context.WithValue(context.Background(), "retryCount", retryCount)
+			err := callback(ctx, item)
+			if err == nil {
+				log.Printf("Processing item %s succeeded after %d retries.", item, retryCount)
+				break
+			}
+			log.Printf("Processing item %s failed (retry %d): %v. Retrying...", item, retryCount, err)
+			time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
 		}
-
-		logrus.WithFields(logrus.Fields{"item": item}).Info("Item processed successfully.")
+		if err != nil {
+			return fmt.Errorf("error processing item %s after all retries: %w", item, err)
+		}
 	}
 	return nil
 }
 
-// Example callback function demonstrating error handling strategies
-func ExampleCallback(item string) error {
-	// Simulate different error scenarios based on the item name
-	switch item {
-	case "timeout":
-		return &TimeoutError{msg: "Callback timed out"}
-	case "bad-format":
-		return errors.New("Item has bad format")
-	case "unexpected":
-		panic("Unexpected error occurred")
+// Example callback function with error handling
+func ExampleCallback(ctx context.Context, item string) error {
+	retryCount := ctx.Value("retryCount").(int)
+
+	// Simulate a temporary error that can be retried
+	if item == "temporary-error" && retryCount < 2 {
+		return &ProcessError{message: "Temporary error occurred", cause: fmt.Errorf("internal processing error")}
 	}
 
-	// If no errors, simulate successful processing
-	logrus.WithFields(logrus.Fields{"item": item}).Info("Simulating successful processing")
-	return nil
-}
+	// Simulate a permanent error
+	if item == "permanent-error" {
+		return fmt.Errorf("item has a permanent error")
+	}
 
-// Setup logrus with fields
-func setupLogging() {
-	logrus.SetFormatter(&logrus.JSONFormatter{})
-	logrus.SetLevel(logrus.InfoLevel)
-	logrus.SetOutput(os.Stdout)
-	logrus.WithField("app", "example-app").Info("Application started.")
+	log.Printf("Processing item: %s, retry count: %d", item, retryCount)
+	return nil
 }
 
 func main() {
-	setupLogging()
+	rand.Seed(time.Now().UnixNano())
+	items := []string{"good", "temporary-error", "permanent-error", "good"}
 
-	items := []string{"item1", "bad-format", "timeout", "unexpected", "item2"}
-
-	defer func() {
-		if r := recover(); r != nil {
-			// Log panic errors
-			logrus.WithField("panic", r).Panic("Recovered from panic")
-		}
-	}()
-
-	err := ProcessItems(items, ExampleCallback)
+	err := ProcessItemsWithRetry(items, ExampleCallback, 2)
 	if err != nil {
-		// Enhanced error handling, based on the error type
-		if timeoutErr, ok := err.(*TimeoutError); ok {
-			// Specific handling for TimeoutError
-			logrus.WithError(timeoutErr).Error("TimeoutError occurred")
-		} else {
-			// General handling for other errors
-			logrus.WithError(err).Error("Error occurred")
-		}
+		log.Printf("Processing failed: %v\n", err)
+	} else {
+		log.Println("Processing completed successfully.")
 	}
 }

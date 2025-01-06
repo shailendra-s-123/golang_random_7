@@ -1,112 +1,93 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
+	"log"
 	"time"
-
-	log "github.com/sirupsen/logrus" // Correct import for logrus
 )
 
-// Custom error types for better traceability
-type TimeoutError struct {
-	msg string
-}
-
-func (e *TimeoutError) Error() string {
-	return fmt.Sprintf("Timeout error: %s", e.msg)
-}
-
-type ProcessingError struct {
+type ProcessError struct {
 	message string
 	cause   error
 }
 
-func (e *ProcessingError) Error() string {
+func (e *ProcessError) Error() string {
 	if e.cause != nil {
-		return fmt.Sprintf("ProcessingError: %s (cause: %v)", e.message, e.cause)
+		return fmt.Sprintf("ProcessError: %s (cause: %v)", e.message, e.cause)
 	}
-	return fmt.Sprintf("ProcessingError: %s", e.message)
+	return fmt.Sprintf("ProcessError: %s", e.message)
 }
 
-// Function that applies a callback to each item, propagating errors
-func ProcessItems(items []string, callback func(string) error) error {
-	log.Info("Starting processing of items...")
-	defer log.Info("Processing completed.")
-
+func ProcessItems(ctx context.Context, items []string, callback func(context.Context, string) error) error {
 	for _, item := range items {
-		log.WithFields(log.Fields{"item": item}).Info("Processing item...")
-
-		start := time.Now()
-		err := callback(item)
+		err := callback(ctx, item)
 		if err != nil {
-			log.WithFields(log.Fields{
-				"item":     item,
-				"duration": time.Since(start),
-				"error":    err,
-			}).Error("Error processing item")
 			return fmt.Errorf("error processing item %s: %w", item, err)
 		}
-
-		log.WithFields(log.Fields{
-			"item":     item,
-			"duration": time.Since(start),
-		}).Info("Item processed successfully.")
 	}
 	return nil
 }
 
-// Example callback function demonstrating error handling strategies
-func ExampleCallback(item string) error {
-	// Simulate different error scenarios based on the item name
+func ExampleCallback(ctx context.Context, item string) error {
+	// Simulate different types of errors
 	switch item {
-	case "timeout":
-		return &TimeoutError{msg: "Callback timed out"}
-	case "bad-format":
-		return errors.New("Item has bad format")
-	case "unexpected":
+	case "temporary-error":
+		// Simulate a temporary error that can be retried
+		return &ProcessError{message: "Temporary error occurred", cause: errors.New("retryable error")}
+	case "permanent-error":
+		// Simulate a permanent error that cannot be retried
+		return &ProcessError{message: "Permanent error occurred", cause: errors.New("non-retryable error")}
+	case "unexpected-error":
+		// Simulate an unexpected error
 		panic("Unexpected error occurred")
+	default:
+		fmt.Printf("Processing item: %s\n", item)
+		return nil
 	}
-
-	// If no errors, simulate successful processing
-	log.WithFields(log.Fields{"item": item}).Info("Simulating successful processing")
-	return nil
 }
 
-// Setup logrus with fields
-func setupLogging() {
-	log.SetFormatter(&log.JSONFormatter{}) // Set log format to JSON
-	log.SetLevel(log.InfoLevel)             // Set log level to Info
-	log.SetOutput(os.Stdout)                // Output to standard output
-	log.WithField("app", "example-app").Info("Application started.")
+func retry(ctx context.Context, fn func(context.Context) error, attempts int, delay time.Duration) error {
+	for i := 0; i < attempts; i++ {
+		err := fn(ctx)
+		if err == nil {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			log.Printf("Retrying in %v: %v", delay, err)
+			time.Sleep(delay)
+		}
+	}
+
+	return fmt.Errorf("exhausted retry attempts")
 }
 
 func main() {
-	// Set up logging
-	setupLogging()
+	items := []string{"good", "temporary-error", "permanent-error", "unexpected-error", "good"}
 
-	// List of items to process
-	items := []string{"item1", "bad-format", "timeout", "unexpected", "item2"}
+	// Set up a logger with structured output
+	logger := log.New(log.Writer(), "", log.LstdFlags|log.Lshortfile)
 
-	// Handle panic recovery
-	defer func() {
-		if r := recover(); r != nil {
-			// Log panic errors
-			log.WithField("panic", r).Panic("Recovered from panic")
-		}
-	}()
+	// Wrap the ExampleCallback with a retry mechanism
+	retryableCallback := func(ctx context.Context, item string) error {
+		return retry(ctx, func(ctx context.Context) error {
+			return ExampleCallback(ctx, item)
+		}, 3, 1*time.Second)
+	}
 
-	// Process items
-	err := ProcessItems(items, ExampleCallback)
+	// Process items with retry
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := ProcessItems(ctx, items, retryableCallback)
 	if err != nil {
-		// Enhanced error handling, based on the error type
-		if timeoutErr, ok := err.(*TimeoutError); ok {
-			// Specific handling for TimeoutError
-			log.WithError(timeoutErr).Error("TimeoutError occurred")
-		} else {
-			// General handling for other errors
-			log.WithError(err).Error("Error occurred")
-		}
+		logger.Printf("Processing failed: %v", err)
+	} else {
+		logger.Println("Processing completed successfully.")
 	}
 }
