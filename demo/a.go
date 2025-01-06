@@ -1,43 +1,43 @@
 package main
 
 import (
-	"fmt"
-	"gonum.org/v1/gonum/stat/regression"
+    "log"
+    "net/http"
+
+    "github.com/gorilla/websocket"
 )
 
-// Employee struct remains the same
-
-// Workforce struct remains the same
-
-// New function to train a linear regression model for performance prediction
-func (w *Workforce) TrainPerformancePredictionModel() *regression.Regression {
-	// Prepare data for regression
-	x := make([]float64, len(w.employees))
-	y := make([]float64, len(w.employees))
-	i := 0
-	for _, emp := range w.employees {
-		x[i] = float64(emp.Workload)
-		y[i] = emp.Performance
-		i++
-	}
-
-	// Train the regression model
-	r := regression.New(regression.WithIntercept(true))
-	r.Train(regression.Data(x, y))
-	return r
+var upgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool {
+        return true
+    },
 }
 
-// Use the trained model to predict performance for new employees
-func (w *Workforce) PredictPerformance(workload int) float64 {
-	r := w.TrainPerformancePredictionModel()
-	predictedPerformance := r.Predict(float64(workload))
-	return predictedPerformance
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+    conn, err := upgrader.Upgrade(w, r, nil)
+    if err != nil {
+        log.Println("Upgrade error:", err)
+        return
+    }
+    defer conn.Close()
+
+    for {
+        messageType, message, err := conn.ReadMessage()
+        if err != nil {
+            log.Println("Read error:", err)
+            break
+        }
+        log.Printf("Received: %s\n", message)
+
+        if err = conn.WriteMessage(messageType, message); err != nil {
+            log.Println("Write error:", err)
+            break
+        }
+    }
 }
 
 func main() {
-	// Initialize workforce system
-	workforce := NewWorkforce()
-	// Add sample employees as before
-
-	// Train the performance prediction model
-	workforce.TrainPerformancePredictionModel()
+    http.HandleFunc("/ws", handleWebSocket)
+    log.Println("WebSocket server started on :8080/ws")
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
